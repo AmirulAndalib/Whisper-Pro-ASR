@@ -462,6 +462,21 @@ def get_dashboard_html():
         let currentTelemetry = [];
         let fullTaskHistory = [];
 
+        function getHwIconAndLabel(unitId) {
+            if (!unitId) return { icon: 'hourglass_empty', label: 'Queued' };
+            const uid = unitId.toString().toLowerCase();
+            if (uid.startsWith('cuda')) {
+                return { icon: 'rocket_launch', label: 'NVIDIA GPU (' + unitId + ')' };
+            } else if (uid.startsWith('npu')) {
+                return { icon: 'psychology_alt', label: 'Intel NPU (' + unitId + ')' };
+            } else if (uid.startsWith('gpu')) {
+                return { icon: 'developer_board', label: 'Intel GPU (' + unitId + ')' };
+            } else if (uid === 'cpu') {
+                return { icon: 'settings_input_component', label: 'Host CPU' };
+            }
+            return { icon: 'memory', label: unitId };
+        }
+
         function escapeHtml(text) {
             if (!text) return "";
             return text.toString()
@@ -523,6 +538,17 @@ def get_dashboard_html():
             const m = Math.floor((sec % 3600) / 60);
             const s = Math.floor(sec % 60);
             return (h < 10 ? "0" + h : h) + ":" + (m < 10 ? "0" + m : m) + ":" + (s < 10 ? "0" + s : s);
+        }
+
+        function getTimerText(t, now) {
+            const startTime = t.start_time || now;
+            const startActive = t.start_active || startTime;
+            if (t.status === 'queued') {
+                return 'Queued for: ' + formatDur(now - startTime);
+            }
+            const activeDur = formatDur(now - startActive);
+            const queueDur = formatDur(startActive - startTime);
+            return 'Running: ' + activeDur + ' (Queue: ' + queueDur + ')';
         }
 
         function handleToggle(id, isOpen) {
@@ -726,8 +752,8 @@ def get_dashboard_html():
                 if (!result.text) {
                     console.warn("[Dashboard] History item missing result.text:", id, h);
                 }
-                const speed = (h.video_duration > 0 && h.total_elapsed_sec > 0) 
-                    ? (h.video_duration / h.total_elapsed_sec).toFixed(1) + 'x'
+                const speed = (h.video_duration > 0 && (h.active_elapsed_sec || h.total_elapsed_sec) > 0) 
+                    ? (h.video_duration / (h.active_elapsed_sec || h.total_elapsed_sec)).toFixed(1) + 'x'
                     : 'N/A';
                 
                 const typeLower = (h.type || "").toLowerCase();
@@ -765,6 +791,7 @@ def get_dashboard_html():
                 const langBadge = langCode ? `<span class="badge badge-lang" style="margin-left:auto;">${langCode.toUpperCase()}</span>` : '';
 
                 const typeIcon = (h.type === '/asr' || h.type === 'Transcription') ? 'record_voice_over' : 'translate';
+                const hw = getHwIconAndLabel(h.unit_id);
 
                 return `<div class="history-card">
                     <div class="task-header">
@@ -781,8 +808,10 @@ def get_dashboard_html():
                             <div class="item-secondary">
                                 <span class="meta-tag" title="Completed At"><span class="material-icons-sharp" style="font-size:12px;color:var(--md-sys-color-secondary)">schedule</span>${h.completed_at}</span>
                                 <span class="meta-tag"><span class="material-icons-sharp" style="font-size:12px">movie</span>${formatDur(h.video_duration)}</span>
-                                <span class="meta-tag" title="Processing Time"><span class="material-icons-sharp" style="font-size:12px">timer</span>Took: ${formatDur(h.total_elapsed_sec)}</span>
+                                <span class="meta-tag" title="Processing Time"><span class="material-icons-sharp" style="font-size:12px">timer</span>Took: ${formatDur(h.active_elapsed_sec || h.total_elapsed_sec)}</span>
+                                <span class="meta-tag" title="Queue Time"><span class="material-icons-sharp" style="font-size:12px">hourglass_empty</span>Queue: ${formatDur(h.queue_elapsed_sec || 0)}</span>
                                 <span class="meta-tag" title="Transcription Speed"><span class="material-icons-sharp" style="font-size:12px">speed</span>Speed: ${speed}</span>
+                                <span class="meta-tag" title="Hardware"><span class="material-icons-sharp" style="font-size:12px;color:var(--md-sys-color-primary)">${hw.icon}</span>${hw.label}</span>
                             </div>
                         </div>
                         ${langBadge}
@@ -913,8 +942,12 @@ def get_dashboard_html():
                     return `
                         <div class="hw-card">
                             <div class="hw-card-title"><span class="material-icons-sharp" style="font-size:12px">${icon}</span> ${u.type}</div>
-                            <div style="font-size: 11px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${u.name}</div>
-                            <div class="hw-card-status ${statusClass}">${statusText}</div>
+                            <div style="font-size: 11px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: 2px;">${u.name}</div>
+                            <div class="hw-card-status ${statusClass}" style="margin-bottom: 6px;">${statusText}</div>
+                            <div style="display: flex; flex-direction: column; gap: 4px; align-items: flex-start;">
+                                <span class="badge badge-${u.uvr_status || 'ready'}" style="padding: 2px 6px; font-size: 9px; border-radius: 4px; line-height: 1.2;">UVR: ${u.uvr_status || 'ready'}</span>
+                                <span class="badge badge-${u.whisper_status || 'ready'}" style="padding: 2px 6px; font-size: 9px; border-radius: 4px; line-height: 1.2;">Whisper: ${u.whisper_status || 'ready'}</span>
+                            </div>
                         </div>
                     `;
                 }).join('');
@@ -963,6 +996,7 @@ def get_dashboard_html():
                         const progressPct = t.progress || 0;
                         const logContent = (t.logs || []).join('\n');
                         const liveText = t.live_text || "Waiting for first transcription segment...";
+                        const hw = getHwIconAndLabel(t.unit_id);
 
                         if (card.innerHTML.trim() === '') {
                             card.innerHTML = `
@@ -980,7 +1014,8 @@ def get_dashboard_html():
                                         <div class="item-secondary">
                                             <span class="meta-tag" style="color:var(--md-sys-color-primary); font-weight:600;"><span class="material-icons-sharp" style="font-size:12px">layers</span><span class="stage-text">${t.stage || 'Initializing'}</span></span>
                                             <span class="meta-tag"><span class="material-icons-sharp" style="font-size:12px">movie</span>${formatDur(t.video_duration)}</span>
-                                            <span class="meta-tag"><span class="material-icons-sharp" style="font-size:12px">timer</span><span class="timer-text">${t.status==='queued'?'Queued for: ':'Running: '}${formatDur(now-(t.start_time || now))}</span></span>
+                                            <span class="meta-tag"><span class="material-icons-sharp" style="font-size:12px">timer</span><span class="timer-text">${getTimerText(t, now)}</span></span>
+                                            <span class="meta-tag hw-tag"><span class="material-icons-sharp hw-icon" style="font-size:12px;color:var(--md-sys-color-primary)">${hw.icon}</span><span class="hw-text">${hw.label}</span></span>
                                         </div>
                                     </div>
                                     <span class="badge badge-${t.status || 'unknown'}">${t.status === 'queued' ? 'queue' : (t.status || 'unknown')}</span>
@@ -1027,11 +1062,19 @@ def get_dashboard_html():
                                 hwWait.style.display = t.status === 'queued' ? 'flex' : 'none';
                             }
 
-                            card.querySelector('.stage-text').innerText = t.stage || 'Initializing';
-                            card.querySelector('.timer-text').innerText = (t.status==='queued'?'Queued for: ':'Running: ') + formatDur(now-(t.start_time || now));
-                            card.querySelector('.progress-bar').style.width = progressPct + '%';
-                            card.querySelector('.progress-text').innerText = progressPct;
-                            const lb = card.querySelector('.log-buffer');
+                             card.querySelector('.stage-text').innerText = t.stage || 'Initializing';
+                             card.querySelector('.timer-text').innerText = getTimerText(t, now);
+                             card.querySelector('.progress-bar').style.width = progressPct + '%';
+                             card.querySelector('.progress-text').innerText = progressPct;
+                             
+                             const hwIconEl = card.querySelector('.hw-icon');
+                             const hwTextEl = card.querySelector('.hw-text');
+                             if (hwIconEl && hwTextEl) {
+                                 hwIconEl.innerText = hw.icon;
+                                 hwTextEl.innerText = hw.label;
+                             }
+
+                             const lb = card.querySelector('.log-buffer');
                             if (lb && lb.innerText !== logContent) {
                                 lb.innerText = logContent;
                                 lb.scrollTop = lb.scrollHeight;
@@ -1053,14 +1096,19 @@ def get_dashboard_html():
                 }
 
                 const engines = data.engines || {};
-                document.getElementById('engine-list').innerHTML = Object.entries(engines).map(([k,v]) => `
-                    <div class="list-item">
-                        <div class="item-info">
-                            <span class="item-primary">${k.toUpperCase()}</span>
-                            <span class="item-secondary">${v.model || 'Unknown'}</span>
-                        </div>
-                        <span class="badge badge-${v.status || 'unknown'}">${v.status || 'unknown'}</span>
-                    </div>`).join('');
+                const orderedKeys = ['uvr', 'whisper'];
+                document.getElementById('engine-list').innerHTML = orderedKeys.map(k => {
+                    const v = engines[k];
+                    if (!v) return '';
+                    return `
+                        <div class="list-item">
+                            <div class="item-info">
+                                <span class="item-primary">${k.toUpperCase()}</span>
+                                <span class="item-secondary">${v.model || 'Unknown'}</span>
+                            </div>
+                            <span class="badge badge-${v.status || 'unknown'}">${v.status || 'unknown'}</span>
+                        </div>`;
+                }).join('');
                 document.getElementById('last-update').innerText = `Updated: ${new Date().toLocaleTimeString()}`;
             } catch (e) { console.error(e); }
         }
