@@ -16,8 +16,9 @@ logger = logging.getLogger(__name__)
 
 # --- [CORE SERVICE CONFIG] ---
 APP_NAME = "Whisper Pro ASR"
-VERSION = "1.0.6"
+VERSION = "1.1.0"
 HARDWARE_UNITS = []  # Global registry for accelerator orchestration
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
 
 # --- [RESOURCE POOL LIMITS] ---
 CPU_CORE_LIMIT = int(os.environ.get("CPU_CORE_LIMIT", 4))
@@ -41,6 +42,7 @@ MAX_CPU = _get_unit_limit("MAX_CPU_UNITS", 1)
 
 # Memory reclamation behavior (unloads models when idle if True)
 AGGRESSIVE_OFFLOAD = os.environ.get("AGGRESSIVE_OFFLOAD", "true").lower() == "true"
+MODEL_IDLE_TIMEOUT = int(os.environ.get("MODEL_IDLE_TIMEOUT", 0))
 
 # --- [HARDWARE DETECTION & DEVICE MAPPING] ---
 # ASR_ENGINE can be: AUTO (default), FASTER-WHISPER, INTEL-WHISPER

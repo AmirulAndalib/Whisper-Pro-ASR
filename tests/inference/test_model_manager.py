@@ -1,5 +1,5 @@
 """Tests for modules/inference/model_manager.py"""
-# pylint: disable=protected-access, too-few-public-methods, redefined-outer-name, unused-import
+# pylint: disable=protected-access, too-few-public-methods, redefined-outer-name, unused-import, import-outside-toplevel, consider-using-with, broad-exception-caught, unused-variable, wrong-import-order
 import threading
 import time
 import os
@@ -149,7 +149,9 @@ class TestRunTranscription:
                 with mock.patch("os.remove") as mock_remove:
                     model_manager.run_transcription(
                         "original.wav", language="en", task="transcribe", batch_size=1)
-                    pm.preprocess_audio.assert_called_with("original.wav", force=False)
+                    pm.preprocess_audio.assert_called_with(
+                        "original.wav", force=False, yield_cb=model_manager._check_preemption
+                    )
                     mock_remove.assert_called_with("isolated.wav")
 
 
@@ -219,6 +221,18 @@ class TestPreemptionAndPriority:
         """Test priority registration."""
         model_manager.wait_for_priority()
         assert utils.THREAD_CONTEXT.is_priority is True
+
+    def test_run_vocal_isolation_direct_passes_preemption_callback(self):
+        """Test that run_vocal_isolation_direct passes _check_preemption callback to preprocess_audio."""
+        pm = mock.MagicMock()
+        model_manager._PREPROCESSOR_POOL["CPU"] = pm
+
+        model_manager.run_vocal_isolation_direct("test.wav", "CPU")
+
+        # Verify preprocess_audio was called with yield_cb=_check_preemption
+        pm.preprocess_audio.assert_called_once_with(
+            "test.wav", force=False, yield_cb=model_manager._check_preemption
+        )
 
     def test_check_preemption_waits_if_paused(self):
         """Test that _check_preemption waits for resume."""
@@ -304,7 +318,7 @@ def test_model_manager_booster_edge_cases():
     # 285: break in batch LD
     with mock.patch("modules.inference.vad.decode_audio", return_value=np.zeros(0)):
         res = model_manager.run_batch_language_detection_direct(mock_model, "test.wav", 5)
-        assert res == []
+        assert not res
 
     # 409: RuntimeError if engine pool is empty
     with mock.patch("modules.inference.model_manager._MODEL_POOL", {}), \
