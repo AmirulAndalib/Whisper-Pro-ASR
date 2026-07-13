@@ -63,17 +63,20 @@ def test_asr_tasks_processed_in_fifo_order():
                 acquisition_order.append(task_id)
         return unit
 
+    registration_events = [threading.Event() for _ in range(4)]
+    proceed_events = [threading.Event() for _ in range(4)]
+
     def run_asr_task(task_num):
         """Run a standard ASR task."""
         utils.THREAD_CONTEXT.reset()
         model_manager.increment_active_session()
         try:
             with model_manager.early_task_registration(is_priority=False):
-                time.sleep(0.05)  # Small delay to let other tasks arrive
-                with model_manager.model_lock_ctx(priority=False) as (_, unit_id):
+                registration_events[task_num].set()
+                proceed_events[task_num].wait()
+                with model_manager.model_lock_ctx(priority=False) as (_, _unit_id):
                     with lock:
                         acquisition_order.append(f"asr_{task_num}_acquired")
-                    time.sleep(0.02)
         finally:
             model_manager.decrement_active_session()
 
@@ -84,7 +87,12 @@ def test_asr_tasks_processed_in_fifo_order():
             t = threading.Thread(target=run_asr_task, args=(i,))
             t.start()
             threads.append(t)
-            time.sleep(0.01)  # Ensure sequential arrival times
+            registration_events[i].wait(timeout=3.0)
+
+        # Release them in order
+        for i in range(4):
+            proceed_events[i].set()
+            time.sleep(0.005)
 
         for t in threads:
             t.join(timeout=10.0)
@@ -134,6 +142,9 @@ def test_detect_language_tasks_processed_in_fifo_order():
     confirm_thread = threading.Thread(target=auto_confirm_priority_waits, daemon=True)
     confirm_thread.start()
 
+    registration_events = [threading.Event() for _ in range(3)]
+    proceed_events = [threading.Event() for _ in range(3)]
+
     def run_priority_task(task_num, delay=0.03):
         """Run a priority detect-language task."""
         utils.THREAD_CONTEXT.reset()
@@ -146,6 +157,8 @@ def test_detect_language_tasks_processed_in_fifo_order():
                 with lock:
                     events.append(f"prio_{task_num}_registered")
                     acquisition_order.append(task_id)
+                registration_events[task_num].set()
+                proceed_events[task_num].wait()
 
                 model_manager.wait_for_priority()
                 with lock:
@@ -161,13 +174,18 @@ def test_detect_language_tasks_processed_in_fifo_order():
             model_manager.decrement_active_session()
 
     try:
-        # Start 3 priority tasks with small delays
+        # Start 3 priority tasks in sequence
         threads = []
         for i in range(3):
             t = threading.Thread(target=run_priority_task, args=(i, 0.02))
             t.start()
             threads.append(t)
-            time.sleep(0.01)  # Ensure sequential arrival
+            registration_events[i].wait(timeout=3.0)
+
+        # Release them in order
+        for i in range(3):
+            proceed_events[i].set()
+            time.sleep(0.005)
 
         for t in threads:
             t.join(timeout=10.0)
@@ -576,6 +594,7 @@ def test_asr_after_three_detectlang_not_stuck_waiting_hardware_dual_accelerator(
                 t_asr2.join(timeout=8.0)
 
     assert not t_asr1.is_alive()
+    assert t_asr2 is not None
     assert not t_asr2.is_alive()
     with lock:
         assert any(e.startswith("asr2_acquired_") for e in events)

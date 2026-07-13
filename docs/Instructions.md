@@ -1,0 +1,250 @@
+# Whisper Pro ASR
+
+> **CRITICAL DEVELOPER NOTE**: Only build or run the Docker image locally if you have compatible hardware (Intel NPU/GPU or NVIDIA GPU) mapped to the container. Otherwise, rely on the CI/CD pipeline and mocks for verification.
+
+## AI & Development Rules
+
+- **Concurrency Priority #1**: Deadlock/livelock prevention and bounded progress always take precedence over performance tuning and feature additions in scheduler/resource code.
+- **File Size Constraint**: Never have a `.py` file larger than **500 lines**. If a file grows beyond this limit, refactor and modularize into smaller files within the `modules/` directory.
+- **Logging Standard**: Use the project's central logger (`logging`) instead of `print()` statements for all modules and scripts.
+- **Thread Compliance**: All multi-threaded components (FFmpeg, OpenVINO, ONNX Runtime) MUST strictly respect the thread limits set in `modules.config` (`ASR_THREADS`, `PREPROCESS_THREADS`, `FFMPEG_THREADS`). Language-detection work must honor those configured thread limits on each hardware unit it uses; do not exceed per-unit thread budgets when multiple units are active.
+- **Media Standardization**: All audio ingested MUST be converted to **16kHz, Mono, 16-bit PCM**. Always use `utils.STANDARD_AUDIO_FLAGS` and `utils.STANDARD_NORMALIZATION_FILTERS` for FFmpeg commands to ensure pipeline consistency.
+- **Efficiency Optimization**: For non-ASR tasks (identification/status), ALWAYS favor segmented FFmpeg extraction (`-ss` / `-t`) from the source media over full-file normalization. Avoid using `soundfile` (`sf.read`) directly on non-WAV video containers as it causes expensive full-file probes.
+- **Resource Cleanup & Stability**: All temporary files and system resources (file descriptors, locks) MUST be managed using `try...finally` blocks to ensure absolute cleanup even on catastrophic failures. Use the project's unified `decrement_active_session()` helper to ensure synchronized resource reclamation and VRAM offloading.
+
+## Mandatory Concurrency Checklist
+
+- Any change touching scheduler/concurrency/model lifecycle paths must include a lock-order review.
+- Synchronization waits in priority/preemption critical paths remain indefinite under saturation and must not fail simply because a scheduler timeout elapsed; avoid timeout-driven abort/re-queue in these paths.
+- Any preemption or queueing behavior change must include liveness regression tests.
+- Any concurrency behavior change must update `docs/CONCURRENCY.md` and relevant agent skill docs in the same task.
+
+## Endpoint Treatment Contract
+
+- `/asr`, `/v1/audio/transcriptions`, and `/v1/audio/translations` are one **standard-priority ASR execution class**.
+- `/detect-language` and `/detectlang` are one **high-priority language-detection execution class**.
+- `/v1/audio/...` is a protocol compatibility surface, not a separate scheduler class.
+
+## Documentation Index
+
+| Document | Description |
+| ---------- | ------------- |
+| [docs/SETUP.md](docs/SETUP.md) | Installation & configuration (includes diarization setup) |
+| [docs/API.md](docs/API.md) | API endpoint reference (diarization, ASR params, subtitle layout) |
+| [docs/TUNING.md](docs/TUNING.md) | Performance optimization guide (idle timeout, initial prompt) |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Technical module documentation (pipelines, caching, lifecycle) |
+
+## Key Features
+
+- **Industrial Hardware Acceleration**: Native support for **Intel NPU**, **Intel iGPU**, and **NVIDIA CUDA**.
+- **Speaker Diarization**: Identify who said what using WhisperX alignment and PyAnnote speaker segmentation. Requires `HF_TOKEN` for PyAnnote model access.
+- **Hardware Compatibility Matrix**:
+
+    | Engine | CPU | NVIDIA (CUDA) | Intel GPU | Intel NPU |
+    | :--- | :---: | :---: | :---: | :---: |
+    | **Vocal Separation** | ✅ | ✅ | ✅ | ✅ |
+    | **Whisper ASR** | ✅ | ✅ | ❌ (CPU Fallback) | ❌ (CPU Fallback) |
+    | **Speaker Diarization** | ✅ | ✅ | ✅ | ✅ |
+
+- **Hybrid Device Support**: Simultaneously utilize multiple accelerators (e.g., Intel for isolation and NVIDIA for transcription).
+- **Advanced Preprocessing Stack**: Integrated **UVR/MDX-NET** (Vocal Isolation) with hardware acceleration and dedicated thread pooling (`PREPROCESS_THREADS`).
+- **OpenAI Compatible**: Native support for `/v1/audio/transcriptions` and `/v1/audio/translations` OpenAI API format.
+- **Swagger Documentation**: Interactive API testing available at `/docs`.
+- **Customizable ASR Parameters**: `initial_prompt`, `vad_filter`, and `word_timestamps` can be set per-request or via environment variables.
+- **Subtitle Layout Control**: `max_line_width` and `max_line_count` for SRT/VTT formatting.
+- **Smart Model Lifecycle**: Configurable `MODEL_IDLE_TIMEOUT` keeps models warm in memory for rapid response, with background idle monitoring.
+- **Probabilistic Language ID**: Robust identification using **Strategic Uniform Sampling** and **Weighted Voting**. The system automatically samples up to 15 non-overlapping zones across the media and aggregates high-confidence evidence to eliminate false positives.
+
+- **Sequential Priority Queue**: High-priority requests (Language Detection) are serialized per-hardware-unit, preserving same-priority FIFO at acquisition time while allowing detect-language tasks to run across multiple units concurrently for maximum throughput and hardware stability.
+- **Deadlock-Free Yielding**: Ongoing transcription threads release hardware model locks during priority wait periods, allowing metadata tasks to pre-empt decoding instantly.
+- **Robust Multi-Stage Cleanup**: Automated intermediate file management ensures that all UVR outputs, converted WAVs, and temporary files are strictly purged.
+- **Unified Precision Logs**: Real-time logging with stable ETA estimation and professional `HH:MM:SS` formatting for all stages.
+- **Unified Session Management**: Integrated task tracking (`_ACTIVE_SESSIONS`) ensures that hardware resources (VRAM/RAM) are only reclaimed when the entire system is idle, preventing race conditions during concurrent requests.
+- **Proactive Resource Reclamation**: Automated model offloading and hardware cache clearing (CUDA/NPU) normally occur after the configured `MODEL_IDLE_TIMEOUT`, or earlier only when aggressive offload configuration is enabled.
+- **Direct Path Support**: Use the `local_path` parameter to avoid HTTP upload overhead for multi-gigabit files.
+
+## Model Selection
+
+The service is highly flexible and supports any **Faster-Whisper** compatible model from Hugging Face.
+
+- **Runtime (Recommended)**: Change the `ASR_MODEL` environment variable in your `docker-compose.yml` (e.g., `Systran/faster-whisper-medium`). The new value takes effect when the service starts or restarts, and that model is downloaded to your persistent cache at startup if not already present.
+- **Offline/Baked-in**: Modify the `WHISPER_MODEL` build argument in the `Dockerfile` and rebuild if you need a specific model permanently baked into the image without internet access.
+
+- **Multilingual**: `large-v3-turbo`, `large-v3`, `medium`, `small`, `tiny`.
+- **English-Only**: Add `.en` suffix for better performance (e.g., `medium.en`).
+- **Distil-Whisper**: Use `distil-whisper/distil-large-v3` for maximum speed (**English-only for all tasks**).
+
+## Hardware Support Details
+
+The service utilizes different backends for transcription and isolation:
+
+Powered by **Faster-Whisper**. Supports **CPU** (Intel MKL/OpenMP) and **NVIDIA CUDA**.
+*Note: Intel OpenVINO ASR is currently disabled to ensure maximum transcription quality (Beam Search support). Hardware auto-detection will default to CPU/CUDA for all decoding tasks.*
+
+### Vocal Separation (Preprocessing)
+
+Powered by **ONNX Runtime (patched for OpenVINO)**. Supports **CPU**, **NVIDIA CUDA**, **Intel GPU**, and **Intel NPU**.
+*This allows for a "Split Architecture" where you can offload vocal cleaning to an Intel iGPU/NPU while keeping your NVIDIA card focused on transcription.*
+
+## Quick Start
+
+```bash
+docker run -d \
+  --name whisper-pro-asr \
+  -p 9000:9000 \
+  --device /dev/accel/accel0 \
+  --device /dev/dri \
+  -v ./model_cache:/app/model_cache \
+  ventura8/whisper-pro-asr:latest
+```
+
+> [!TIP]
+> **Autonomous Detection**: The service automatically identifies and utilizes NVIDIA GPUs, Intel NPUs, or Intel iGPUs. Manual device configuration is optional.
+> [!IMPORTANT]
+> **NPU Compilation Cache**: Always map the `./model_cache` volume. This stores the binary blobs unique to your specific NPU hardware/driver version, reducing startup time from minutes to seconds on subsequent runs.
+
+## Zero-Wait Detection & Priority Yielding
+
+The service implements a **Full-Pipeline Priority Yielding** system with unit-scoped preemption gates. When a `/detect-language` request arrives:
+
+1. **Pre-emption Detection**: Ongoing ASR tasks (including both heavy UVR/MDX-NET preprocessing and Whisper decoding stages) detect the pause request at the next available yield point.
+2. **Hardware Yielding**: The processing thread releases its claim on the hardware model lock (`_MODEL_LOCK`) and enters a bounded handoff synchronization state.
+   - **Timeout policy**: preemption handoff waits are indefinite under saturation; periodic liveness checks/logging are allowed, but timeout-based failure, abort, or re-queue is not.
+
+   This prevents deadlocks and ensures the high-priority task has immediate access to acceleration.
+3. **Per-Unit Pause Targeting**: If all units are busy, the scheduler targets a specific hardware unit and asserts pause on that unit's sync entry.
+4. **Resumption**: Once priority pressure for the targeted unit clears, that unit's resume event is triggered. The ASR thread re-acquires the model lock and resumes exactly where it left off.
+
+## CI/CD and Verification
+
+The project features an optimized CI/CD pipeline that consolidates linting and testing for maximum efficiency. Pylint, Ruff, Flake8, and Markdownlint are enforced everywhere they apply to guarantee a zero-regression quality standard across code and documentation. Flake8 is enforced with `max-line-length=140`, no violations are ignored, and repository Markdown is checked with `markdownlint-cli2` using the repo configuration and auto-fix flow.
+
+### Local Verification
+
+You can run the full test and lint suite locally using Docker to mirror the CI environment:
+
+Local parity scripts (`scripts/ci/build-and-test.sh` and `scripts/ci/build-and-test.ps1`) automatically bootstrap missing host/frontend dependencies for Playwright CLI and MCP tooling by installing npm dependencies when needed, installing Playwright Chromium (`npx playwright install chromium`), and validating MCP CLI availability (`npx @playwright/mcp --help`). These checks require Node.js 20+.
+
+```bash
+# Verify poetry.lock first when dependency metadata changed.
+# CI fails if poetry.lock is missing or out of sync.
+# Local parity scripts can regenerate when missing/stale.
+docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/workspace" -w /workspace python:3.12-slim /bin/bash -lc "export HOME=/tmp && python -m pip install --quiet --user poetry && if [ ! -f poetry.lock ] || ! python -m poetry check --lock; then echo 'poetry.lock is missing or out of sync. Please run poetry lock locally and commit the changes.' && exit 1; fi"
+
+# Build the test image (cached layers from production are used automatically)
+docker build -t whisper-npu-test -f Dockerfile.test .
+
+# Auto-fix Markdown before validation when docs changed
+npm run fix:md
+
+# Run the suite (Markdownlint + Yamllint + Ruff check & format + Flake8 + Pylint everywhere + Pytest + Coverage)
+docker run --rm whisper-npu-test
+```
+
+## Release Notes v1.1.5
+
+- **FEAT**: Normalized App CPU percentage relative to host CPU capacity, correcting the dual-scale CPU representation on the dashboard and charts.
+- **FEAT**: Added System Memory tracking and visualization in the Memory Allocation dashboard charts.
+- **FEAT**: Integrated advanced Strategy 2 Multi-Stage Progress Deconstruction for live speed and ETA estimations, offering smooth and accurate transitions between Vocal Separation (UVR) and Whisper inference (ASR) pipelines.
+- **DEPS**: Pin and upgrade python dependencies to latest compatible stable versions and frontend devDependencies/overrides to latest final versions (Vitest 4, ESLint 10, Stylelint 17, and globals 17).
+- **TEST**: Passed all 609 python pytest tests and 66 vitest frontend JS tests successfully with 94.83% overall backend coverage and 92.64% frontend coverage.
+
+## Release Notes v1.1.4
+
+- **FEAT**: Integrated Ruff static analysis and formatting checks everywhere in the codebase (including all tests).
+- **FEAT**: Enforced Pylint checks on the `tests/` directory as well as all production modules and entry points, achieving a perfect **10.00/10** Pylint score codebase-wide.
+- **CI/CD**: Added Ruff checks and codebase-wide Pylint verification to the local test runner (`run_suite.sh`), the Docker test pipeline (`Dockerfile.test`), and the GitHub Actions CI workflow (`ci.yml`).
+- **FEAT**: Segmented telemetry tracking. Introduced daily and cumulative usage metrics segmented by endpoint category (`/asr`, `/detect-language`, `/v1/audio/...`), with automatic legacy database backfilling.
+- **FEAT**: Split monolithic dashboard into modular components. Refactored the analytics dashboard into modular HTML, CSS, and JS template assets.
+- **DEPS**: Upgraded FastAPI to `>=0.138.0` and Swagger UI to `v5.32.6` to support the latest web service and interactive API documentation features.
+- **FIX**: Upgraded DockerHub description action to `v5` in GitHub Actions CI to target Node.js 24 runtime, eliminating deprecation warnings.
+- **FIX**: Hardened scheduler liveness during long vocal-separation preprocessing by emitting cooperative yield checkpoints at UVR chunk boundaries and skipping unnecessary pause confirmation waits once the priority backlog clears.
+- **FIX**: Resolved `pytest` import error in unit tests and isolated the integration cleanup files test to prevent state pollution.
+- **TEST**: Passed all 542 unit and integration tests successfully with a perfect **10.00/10** score on all files under `pylint` and **94.99%** overall coverage.
+
+## Release Notes v1.1.3
+
+- **FEAT**: Refactored the live transcription progress pipeline to append pre-formatted SubRip (SRT) blocks incrementally (reducing live update complexity to $O(1)$) instead of rebuilding the entire stream on every segment, preventing performance bottlenecks and memory bloat on large media files.
+- **FEAT**: Refactored OpenVINO engine transcription (`IntelWhisperEngine`) to split long media files dynamically into structured chunks guided by speech VAD timestamps, and auto-detecting/locking the language on the first chunk to ensure stability on very long movies.
+- **FEAT**: Patched the UVR vocal separation process dynamically on the scheduler to compute and emit real-time chunk progress status to prevent visual hangs during vocal separation.
+- **STAB**: Enhanced RAM-disk / SSD protection by raising `WHISPER_TEMP_MIN_FREE_MB` to `2048` MB and implementing a 1.5x headroom factor fallback based on estimated WAV sizes.
+- **FEAT**: Deconstructed the monolithic `dashboard.html` into a cleaner layout under a dedicated `templates/` directory containing separate CSS and JS components.
+- **TEST**: Passed all unit, integration, and coverage tests with a perfect **10.00/10** score on all files under `pylint`.
+
+## Release Notes v1.1.2
+
+- **FIX**: Replaced fixed-interval `ModelIdleMonitor` polling thread with a deferred `threading.Timer` that starts after the last task completes. New tasks cancel and reschedule the timer, keeping models warm during bursty workloads.
+- **FIX**: Resolved dashboard hardware utilization chart showing `0%` on initial page load (only displaying correct values after F5 refresh).
+- **FIX**: Dashboard chart no longer incorrectly reports GPU/NPU utilization for Whisper ASR when it runs on CPU.
+- **FIX**: Extended metrics discovery to correctly account for `/detect-language` tasks alongside `/asr` tasks in utilization calculations.
+- **FIX**: Removed all `# pylint: disable` suppressions from production code. All lint compliance achieved through genuine code improvements (specific exception types, reduced locals, clean module access).
+- **STAB**: Added `_POOL_LOCK` to serialize model loading and unloading, preventing race conditions during concurrent engine state transitions.
+- **TEST**: Verified all unit and integration tests passing with a clean **10.00/10** pylint score on all files.
+
+## Release Notes v1.1.1
+
+- **FIX**: Resolved all pylint complexity warnings (`too-many-locals` and `too-many-positional-arguments` in `diarization.py`) by converting `run_diarization` parameters to keyword-only and extracting sub-helpers.
+- **FIX**: Eliminated static and runtime cyclic imports between `model_manager`, `concurrency`, and `language_detection_core` using runtime `sys.modules` lookup.
+- **FEAT**: Standardized duration metrics formatting across analytics pages to a unified, zero-padded `dd:hh:mm:ss` display.
+- **TEST**: Passed all 345 unit/integration tests with a final **95.24%** coverage and a clean **10.00/10** score on all files under `pylint`.
+
+## Release Notes v1.1.0
+
+- **FEAT**: Integrated automatic Speaker Diarization using the WhisperX alignment, PyAnnote diarization, and speaker assignment pipeline, including per-device pools caching.
+- **FEAT**: Added custom subtitle formatting controls (`max_line_width`, `max_line_count`) across SRT and VTT formatters.
+- **FEAT**: Added a background daemon idle model timeout monitor (`MODEL_IDLE_TIMEOUT`) to automatically offload warm models after inactivity.
+- **FEAT**: Extended API support with standard OpenAI-compatible and query parameters (`initial_prompt`, `vad_filter`, `word_timestamps`, `diarize`, `min_speakers`, `max_speakers`, `hf_token`, `max_line_width`, `max_line_count`).
+- **TEST**: Verified coverage to 94.77% (exceeding 90% target) with 323/323 unit and integration tests passing.
+
+## Release Notes v1.0.6
+
+- **FIX**: Resolved a critical deadlock/livelock bug in the preemption scheduler where concurrent priority requests (like Language Detection) could race and permanently lock standard transcription tasks in a paused state.
+- **STAB**: Implemented graceful fallback to Host CPU execution if the hardware unit registry is empty on startup, preventing worker threads from blocking indefinitely.
+- **TEST**: Added exhaustive concurrency test suite covering 0, 1, 2, and 3 hardware unit configurations to prevent scheduling regressions.
+- **STAB**: Addressed code hygiene and python linters: resolved unused arguments, inconsistent return statements, and local imports, achieving a perfect 10/10 pylint score and keeping coverage above 90% for all files.
+- **OBS**: Registered queued priority tasks immediately upon arrival, exposing them on the telemetry dashboard with "Paused for Priority Task" stage during resource contention.
+
+## Release Notes v1.0.5
+
+- **FEAT**: Implemented request-local file tracking registry for 100% reclamation of temporary files (uploaded media, standardized WAVs, isolated stems, and HQ prep files) on error/success.
+- **STAB**: Hardened persistent diagnostic logging to survive container updates and app restarts.
+- **STAB**: Added real-time log flushing and zero-caching headers for the log download endpoint.
+
+## Release Notes v1.0.4
+
+- **FIX**: Resolved "nn" (Nynorsk) language hallucination on silent or non-speech audio segments.
+- **FEAT**: Implemented **High-Performance Batch Montage**. Consolidated all sampling targets into a single high-density montage with **30s Grid Padding**, enabling single-pass UVR isolation and reducing identification latency by up to 80%.
+- **FEAT**: Added **Entropy-Adaptive Smart Search**. The engine now recovers from silent zones by scanning strides for peak signal energy.
+- **FEAT**: Implemented **Confusion-Matrix Tie-Breaker**. Resolves ambiguities between similar language pairs (e.g., NO/NN) with weighted bias resolution.
+- **FEAT**: Added **Fail-Safe Dual-Path VAD**. Automatically verifies speech and signal confidence on both isolated and raw audio segments. If confidence is <80% on isolated audio, it audits the raw signal and selects the one with higher confidence.
+- **FEAT**: Implemented **Strategic Uniform Sampling** for language detection. The engine now samples up to 5 non-overlapping zones across the entire media to ensure representative identification.
+- **FEAT**: Enhanced **Dynamic Chunk Sizing**. Samples now scale linearly (5m to 20m) to provide deep context for both short clips and feature films.
+- **FEAT**: Implemented **Weighted Multi-Segment Voting**. Aggregates probabilities with confidence-weighted averaging to eliminate Nynorsk (nn) hallucinations.
+- **STAB**: Integrated hardware-aware parallel limits (`ASR_PARALLEL_LIMIT_ACCEL`) to prevent VRAM/NPU congestion during concurrent tasks.
+- **STAB**: Implemented **Unified Session Orchestration** and proactive resource reclamation. AI models are now automatically offloaded from VRAM/RAM immediately after task completion, ensuring long-term system stability.
+
+## Release Notes v1.0.1
+
+- **FIX**: Automatically clean up legacy storage leaks from version 1.0.0 in the preprocessing cache at startup.
+- **FIX**: Resolved an issue where temporary vocal and instrumental stems were not properly cleaned up, causing `model_cache/preprocessing` to grow indefinitely.
+- **FIX**: Warmup inference stems are now properly captured and deleted on startup.
+- **FIX**: Temporary input files during in-memory segment processing are now cleaned up via `finally` blocks, preventing leaks on separator exceptions.
+- **FIX**: Closed leaked file descriptors from `tempfile.mkstemp` in segmented isolation and added error-path cleanup for partial output files.
+- **FIX**: Resolved relative path reconciliation issues for audio stems in Windows and Docker environments.
+- **STAB**: Hardened FFmpeg error parsing for corrupted or zero-byte input files.
+- **FFmpeg 8.1.0**: Upgraded to official static builds with optimized multithreading paths.
+
+## Release Notes v1.0.0
+
+- **Improved Language Detection**: Enhanced accuracy via **Squared Confidence Weighting** and full probability distribution analysis.
+- **OpenAI/Bazarr Compatibility**: Added `/v1/audio/transcriptions` and `/v1/audio/translations` aliases with support for `response_format` and `file` parameters.
+- **Swagger UI**: Integrated interactive documentation at `/docs`.
+- **Race Condition Fix**: Implemented thread synchronization in Vocal Separation to prevent `NoneType` errors during concurrent processing.
+- **Stability Fix**: Resolved audio truncation issues in FFmpeg preprocessing by switching to 16-bit PCM and optimizing audio filters.
+- **Hallucination Filtering Fix**: Fixed a bug where filtered hallucinations would still appear in the final consolidated text field.
+- **Code Quality**: Refactored core modules to achieve 100% Pylint compliance and verified >90% code coverage across the entire project.
+- **High-Fidelity Pipeline**: Transitioned to **UVR/MDX-NET** for superior vocal isolation and natural signal mix-back (15%) for maximum Whisper confidence.
+- **Precision Logging**: Unified professional `HH:MM:SS` formatting and dynamic step numbering across all modules.
+- **Smart Detection**: Enhanced with iterative speech search and unified progress bars for language ID segments.
+- **Responsive Pre-empting**: Multi-stage yielding mechanism covers both preprocessing and decoding stages for zero-wait detection.
+- **Startup Warmup**: Eager model initialization and hardware verification.

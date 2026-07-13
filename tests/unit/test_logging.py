@@ -460,6 +460,6 @@ class TestHardwareInfo:
                     "resource_pool": "GPU.0, CPU",
                 }
                 lines = _banner_config_lines(cfg)
-                assert any("OpenVINO (GPU)" in l for l in lines)
-                assert any("[DEVICE PROPERTIES]" in l for l in lines)
-                assert any("Prop1" in l for l in lines)
+                assert any("OpenVINO (GPU)" in line for line in lines)
+                assert any("[DEVICE PROPERTIES]" in line for line in lines)
+                assert any("Prop1" in line for line in lines)

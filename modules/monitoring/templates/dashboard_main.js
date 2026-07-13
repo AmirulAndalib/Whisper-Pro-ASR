@@ -57,6 +57,41 @@ async function saveSettings() {
     } catch (e) { alert("Failed to save settings: " + e); }
 }
 
+async function clearTaskHistory() {
+    if (!confirm("Are you sure you want to permanently clear all task history? This cannot be undone.")) {
+        return;
+    }
+    try {
+        const res = await fetch("/system/history/clear", { method: "POST" });
+        if (res.ok) {
+            alert("Task history purged successfully.");
+            fullTaskHistory = [];
+            renderHistory();
+        } else {
+            alert("Failed to clear task history.");
+        }
+    } catch (e) { alert("Error: " + e); }
+}
+
+async function clearTelemetryMetrics() {
+    if (!confirm("Are you sure you want to permanently clear all telemetry metrics? This cannot be undone.")) {
+        return;
+    }
+    try {
+        const res = await fetch("/system/telemetry/clear", { method: "POST" });
+        if (res.ok) {
+            alert("Telemetry history purged successfully.");
+            rollingTelemetryBuffer = [];
+            if (typeof globalThis.resetTelemetryChartsAndStats === 'function') {
+                globalThis.resetTelemetryChartsAndStats();
+            }
+            renderCharts();
+        } else {
+            alert("Failed to clear telemetry metrics.");
+        }
+    } catch (e) { alert("Error: " + e); }
+}
+
 function renderAuditDetails(item, isOpen) {
     const id = item.task_id || item.filename;
     const caller = item.caller_info || {};
@@ -90,13 +125,74 @@ function renderAuditDetails(item, isOpen) {
     `;
 }
 
+function normalizeTaskFilterType(type) {
+    if (type === 'isolation' || type === 'isolations') return 'detectlang';
+    if (type === 'detect-language') return 'detectlang';
+    return type;
+}
+
+// Helper to determine ASR-like categories (used for icons and logic)
+function isAsrLikeCategory(category) {
+    return category === 'asr' || category === 'v1';
+}
+
+function matchesCategoryFilter(item, rawFilter) {
+    const selected = normalizeTaskFilterType(rawFilter);
+    const category = getTaskFilterCategory(item);
+    if (selected === 'asr') return category === 'asr';
+    if (selected === 'detectlang') return category === 'detectlang';
+    if (selected === 'v1') return category === 'v1';
+    return true;
+}
+
+function getTaskFilterCategory(task) {
+    const typeLower = String((task && task.type) || '').toLowerCase();
+    const stageLower = String((task && task.stage) || '').toLowerCase();
+
+    const isV1 = typeLower.includes('/v1/audio/') || typeLower.includes('v1/audio');
+    const isDetectLang =
+        typeLower.includes('/detect-language') ||
+        typeLower.includes('/detectlang') ||
+        typeLower.includes('detect-language') ||
+        typeLower.includes('detectlang') ||
+        typeLower.includes('language detection') ||
+        typeLower.includes('translate') ||
+        typeLower.includes('isolation') ||
+        typeLower.includes('uvr') ||
+        stageLower.includes('vocal') ||
+        stageLower.includes('separation') ||
+        stageLower.includes('uvr');
+    const isAsr = !isV1 && (
+        typeLower === '/asr' ||
+        typeLower === 'asr' ||
+        typeLower.includes('transcription') ||
+        typeLower.includes('trans') ||
+        typeLower.includes('asr')
+    );
+
+    if (isV1) return 'v1';
+    if (isDetectLang) return 'detectlang';
+    if (isAsr) return 'asr';
+    return 'other';
+}
+
 function renderHistory() {
     const hList = document.getElementById('history-list');
     if (!fullTaskHistory || fullTaskHistory.length === 0) {
         hList.innerHTML = `<div class="empty-state"><span class="material-icons-sharp empty-icon">history</span><div><strong>No history yet</strong></div></div>`;
         return;
     }
-    const orderedHistory = [...fullTaskHistory].sort((a, b) => {
+
+    let filteredHistory = [...fullTaskHistory].filter(h => {
+        return matchesCategoryFilter(h, globalThis.historyTaskFilter);
+    });
+
+    if (filteredHistory.length === 0) {
+        hList.innerHTML = `<div class="empty-state"><span class="material-icons-sharp empty-icon">history</span><div><strong>No history matches filter</strong></div></div>`;
+        return;
+    }
+
+    const orderedHistory = filteredHistory.sort((a, b) => {
         const aStart = Number(a.start_time || 0);
         const bStart = Number(b.start_time || 0);
         if (aStart !== bStart) return bStart - aStart;
@@ -114,8 +210,9 @@ function renderHistory() {
             ? (h.video_duration / (h.active_elapsed_sec || h.total_elapsed_sec)).toFixed(1) + 'x'
             : '0.0x';
         
-        const typeLower = (h.type || "").toLowerCase();
-        const isAsr = typeLower.includes('asr') || typeLower.includes('trans') || typeLower.includes('audio');
+        const category = getTaskFilterCategory(h);
+        const isAsrLike = isAsrLikeCategory(category);
+
         const finalSrt = result.text || h.live_text;
         
         let contentHtml = '';
@@ -126,14 +223,14 @@ function renderHistory() {
             </div>`;
         } else if (finalSrt) {
             contentHtml = `<div class="result-box">${escapeHtml(finalSrt)}</div>`;
-        } else if (isAsr) {
+        } else if (isAsrLike) {
             contentHtml = `<div class="result-box" style="font-style:italic; color:var(--md-sys-color-secondary)">
                 <span class="material-icons-sharp" style="font-size:14px; vertical-align:middle">info</span> 
                 No speech detected or transcription failed.
             </div>`;
         }
 
-        const resText = (result.error || finalSrt || isAsr) ? `
+        const resText = (result.error || finalSrt || isAsrLike) ? `
             <div style="margin-top:12px; width:100%;">
                 <details ${expandedElements.has(`${id}_trans`) ? 'open' : ''} style="width:100%;" ontoggle="handleToggle('${id}_trans', this.open)">
                     <summary style="display:flex; align-items:center; justify-content:space-between; width:100%;">
@@ -161,7 +258,7 @@ function renderHistory() {
         const langCode = result.language || result.detected_language;
         const langBadge = langCode ? `<span class="badge badge-lang" style="margin-left:auto;">${langCode.toUpperCase()}</span>` : '';
 
-        const typeIcon = (h.type === '/asr' || h.type === 'Transcription') ? 'record_voice_over' : 'translate';
+        const typeIcon = isAsrLike ? 'record_voice_over' : 'translate';
         const hw = getHwIconAndLabel(h.unit_id);
 
         return `<div class="history-card">
@@ -199,6 +296,44 @@ function renderHistory() {
     }).join('');
 }
 
+function startRefreshInterval() {
+    if (typeof refreshTimer !== 'undefined' && refreshTimer) {
+        clearInterval(refreshTimer);
+        refreshTimer = null;
+    }
+    if (refreshEnabled && typeof currentRefreshInterval !== 'undefined') {
+        refreshTimer = setInterval(updateStats, currentRefreshInterval);
+    }
+}
+
+function changeRefreshInterval(val) {
+    currentRefreshInterval = parseInt(val, 10);
+    startRefreshInterval();
+    renderCharts();
+}
+
+function filterTasks(type) {
+    const normalizedType = normalizeTaskFilterType(type);
+    globalThis.activeTaskFilter = normalizedType;
+    document.querySelectorAll('#active-section .filter-row button').forEach(btn => {
+        btn.classList.remove('active-filter');
+    });
+    const selectedBtn = document.getElementById(`filter-${normalizedType}`);
+    if (selectedBtn) selectedBtn.classList.add('active-filter');
+    updateStats();
+}
+
+function filterHistory(type) {
+    const normalizedType = normalizeTaskFilterType(type);
+    globalThis.historyTaskFilter = normalizedType;
+    document.querySelectorAll('#history-section .filter-row button').forEach(btn => {
+        btn.classList.remove('active-filter');
+    });
+    const selectedBtn = document.getElementById(`hist-filter-${normalizedType}`);
+    if (selectedBtn) selectedBtn.classList.add('active-filter');
+    renderHistory();
+}
+
 function toggleRefresh() {
     refreshEnabled = !refreshEnabled;
     const icon = document.getElementById('refresh-icon');
@@ -211,12 +346,14 @@ function toggleRefresh() {
         btn.style.background = 'var(--md-sys-color-primary-container)';
         btn.style.color = 'var(--md-sys-color-primary)';
         updateStats();
+        startRefreshInterval();
     } else {
         icon.innerText = 'sync_disabled';
         icon.classList.remove('pulse');
         text.innerText = 'Refresh Paused';
         btn.style.background = 'var(--meta-bg)';
         btn.style.color = 'var(--md-sys-color-secondary)';
+        startRefreshInterval();
     }
 }
 
@@ -248,57 +385,144 @@ function calculateHistoricalSpeeds(history) {
 }
 
 // Helper function to calculate speed and ETA for a task
-function calculateTaskSpeedAndEta(t, now, history, isUvr) {
+function calculateTaskSpeedAndEta(t, now, historicalSpeeds, isUvr) {
+    if (isUvr === undefined) {
+        const stage = (t.stage || "").toLowerCase();
+        isUvr = t.type === 'Isolation' || (stage.includes('vocal') || stage.includes('separation') || stage.includes('uvr'));
+    }
+
     let calculatedSpeed = 0;
     let remainingSeconds = 0;
     const startActive = t.start_active || t.start_time;
     const elapsedActive = now - startActive;
-    const processedDuration = t.current_position || 0;
+    const processedDuration = t.current_position || ((t.progress || 0) / 100 * t.video_duration) || 0;
 
-    const { expectedAsrSpeed, expectedUvrSpeed } = calculateHistoricalSpeeds(history);
+    // Track active task progress timeline
+    const taskId = t.task_id || t.filename;
+    const currentStage = t.stage || "";
+    let timeline = (typeof activeTaskTimeline !== 'undefined' && taskId) ? activeTaskTimeline[taskId] : null;
 
-    if (isUvr) {
-        const uvrSpeed = (elapsedActive > 0 && processedDuration > 0) ? (processedDuration / elapsedActive) : 0;
+    if (timeline && timeline.lastPosition !== undefined && timeline.lastPosition === processedDuration && timeline.lastStage === currentStage) {
+        calculatedSpeed = timeline.lastCalculatedSpeed || 0;
+        const timePassed = now - (timeline.lastSmoothedTimestamp || now);
+        remainingSeconds = Math.max(0, (timeline.lastRemainingSeconds || 0) - timePassed);
+        return { calculatedSpeed, remainingSeconds };
+    }
 
-        if (uvrSpeed > 0) {
-            const remainingUvrSec = (t.video_duration - processedDuration) / uvrSpeed;
-            const expectedAsrSec = (expectedAsrSpeed > 0) ? (t.video_duration / expectedAsrSpeed) : 0;
-            const totalEstimatedSec = elapsedActive + remainingUvrSec + expectedAsrSec;
-            if (totalEstimatedSec > 0) {
-                calculatedSpeed = t.video_duration / totalEstimatedSec;
-                remainingSeconds = remainingUvrSec + expectedAsrSec;
+    if (typeof activeTaskTimeline !== 'undefined' && taskId) {
+        if (!activeTaskTimeline[taskId]) {
+            activeTaskTimeline[taskId] = [];
+        }
+        timeline = activeTaskTimeline[taskId];
+        const timelineArr = timeline;
+        if (timelineArr.lastStage !== undefined && timelineArr.lastStage !== currentStage) {
+            timelineArr.length = 0;
+        }
+        timelineArr.lastStage = currentStage;
+        if (timelineArr.length === 0 || timelineArr[timelineArr.length - 1].timestamp !== now) {
+            timelineArr.push({ timestamp: now, position: processedDuration });
+        }
+        // Keep last 60 seconds
+        const cutoff = now - 60;
+        while (timelineArr.length > 0 && timelineArr[0].timestamp < cutoff) {
+            timelineArr.shift();
+        }
+    }
+
+    // Calculate live speed over the last 15 seconds
+    let liveSpeed = 0;
+    if (typeof activeTaskTimeline !== 'undefined' && taskId) {
+        const timeline = activeTaskTimeline[taskId] || [];
+        if (timeline.length >= 2) {
+            let referencePoint = timeline[0];
+            const targetTime = now - 15;
+            for (let i = timeline.length - 1; i >= 0; i--) {
+                if (timeline[i].timestamp <= targetTime) {
+                    referencePoint = timeline[i];
+                    break;
+                }
             }
-        } else if (expectedUvrSpeed > 0) {
-            const expectedUvrSec = t.video_duration / expectedUvrSpeed;
-            const expectedAsrSec = (expectedAsrSpeed > 0) ? (t.video_duration / expectedAsrSpeed) : 0;
-            const totalEstimatedSec = expectedUvrSec + expectedAsrSec;
-            if (totalEstimatedSec > 0) {
-                calculatedSpeed = t.video_duration / totalEstimatedSec;
-                remainingSeconds = Math.max(0, totalEstimatedSec - elapsedActive);
+            const deltaPos = processedDuration - referencePoint.position;
+            const deltaTime = now - referencePoint.timestamp;
+            if (deltaTime > 0 && deltaPos >= 0) {
+                liveSpeed = deltaPos / deltaTime;
             }
         }
+    }
+
+    let expectedAsrSpeed = 0;
+    let expectedUvrSpeed = 0;
+    if (historicalSpeeds) {
+        if (Array.isArray(historicalSpeeds)) {
+            const hs = calculateHistoricalSpeeds(historicalSpeeds);
+            expectedAsrSpeed = hs.expectedAsrSpeed;
+            expectedUvrSpeed = hs.expectedUvrSpeed;
+        } else {
+            expectedAsrSpeed = historicalSpeeds.expectedAsrSpeed || 0;
+            expectedUvrSpeed = historicalSpeeds.expectedUvrSpeed || 0;
+        }
+    }
+
+    if (isUvr) {
+        let uvrSpeed = 0;
+        if (elapsedActive > 5 && liveSpeed > 0) {
+            uvrSpeed = liveSpeed;
+        } else if (elapsedActive > 0 && processedDuration > 0) {
+            uvrSpeed = processedDuration / elapsedActive;
+        } else {
+            uvrSpeed = expectedUvrSpeed || 2.0;
+        }
+
+        if (timeline) {
+            if (timeline.lastSmoothedUvrSpeed !== undefined && timeline.lastSmoothedUvrTimestamp !== undefined) {
+                const dt = Math.max(0.1, now - timeline.lastSmoothedUvrTimestamp);
+                const alpha = 1 - Math.exp(-dt / 12.3);
+                uvrSpeed = alpha * uvrSpeed + (1 - alpha) * timeline.lastSmoothedUvrSpeed;
+            }
+            timeline.lastSmoothedUvrSpeed = uvrSpeed;
+            timeline.lastSmoothedUvrTimestamp = now;
+        }
+
+        const remainingUvrSec = Math.max(0, (t.video_duration - processedDuration) / uvrSpeed);
+        const expectedAsrSec = (expectedAsrSpeed > 0) ? (t.video_duration / expectedAsrSpeed) : (t.video_duration / 5.0);
+        remainingSeconds = remainingUvrSec + expectedAsrSec;
+        const totalEstimatedSec = elapsedActive + remainingSeconds;
+        calculatedSpeed = totalEstimatedSec > 0 ? (t.video_duration / totalEstimatedSec) : 0;
     } else {
         const startInference = t.start_inference || startActive;
         const elapsedAsr = now - startInference;
         const uvrElapsed = t.start_inference ? (t.start_inference - startActive) : 0;
 
-        if (elapsedAsr > 5 && processedDuration > 0) {
-            const asrSpeed = processedDuration / elapsedAsr;
-            if (asrSpeed > 0) {
-                remainingSeconds = (t.video_duration - processedDuration) / asrSpeed;
-                const totalEstimatedSec = uvrElapsed + elapsedAsr + remainingSeconds;
-                if (totalEstimatedSec > 0) {
-                    calculatedSpeed = t.video_duration / totalEstimatedSec;
-                }
-            }
-        } else if (expectedAsrSpeed > 0 && elapsedAsr > 0) {
-            const expectedAsrSec = t.video_duration / expectedAsrSpeed;
-            const totalEstimatedSec = uvrElapsed + expectedAsrSec;
-            if (totalEstimatedSec > 0) {
-                calculatedSpeed = t.video_duration / totalEstimatedSec;
-                remainingSeconds = Math.max(0, totalEstimatedSec - elapsedActive);
-            }
+        let asrSpeed = 0;
+        if (elapsedAsr > 5 && liveSpeed > 0) {
+            asrSpeed = liveSpeed;
+        } else if (elapsedAsr > 0 && processedDuration > 0) {
+            asrSpeed = processedDuration / elapsedAsr;
+        } else {
+            asrSpeed = expectedAsrSpeed || 5.0;
         }
+
+        if (timeline) {
+            if (timeline.lastSmoothedAsrSpeed !== undefined && timeline.lastSmoothedAsrTimestamp !== undefined) {
+                const dt = Math.max(0.1, now - timeline.lastSmoothedAsrTimestamp);
+                const alpha = 1 - Math.exp(-dt / 12.3);
+                asrSpeed = alpha * asrSpeed + (1 - alpha) * timeline.lastSmoothedAsrSpeed;
+            }
+            timeline.lastSmoothedAsrSpeed = asrSpeed;
+            timeline.lastSmoothedAsrTimestamp = now;
+        }
+
+        remainingSeconds = Math.max(0, (t.video_duration - processedDuration) / asrSpeed);
+        const totalEstimatedSec = uvrElapsed + elapsedAsr + remainingSeconds;
+        calculatedSpeed = totalEstimatedSec > 0 ? (t.video_duration / totalEstimatedSec) : 0;
+    }
+
+    if (timeline) {
+        timeline.lastCalculatedSpeed = calculatedSpeed;
+        timeline.lastRemainingSeconds = remainingSeconds;
+        timeline.lastPosition = processedDuration;
+        timeline.lastStage = currentStage;
+        timeline.lastSmoothedTimestamp = now;
     }
 
     return { calculatedSpeed, remainingSeconds };
@@ -406,6 +630,7 @@ async function updateStats() {
         }
 
         fullTaskHistory = data.history || [];
+        const historicalSpeeds = calculateHistoricalSpeeds(data.history);
 
         if (currentTab === 'charts') renderCharts();
         if (currentTab === 'history') renderHistory();
@@ -474,7 +699,9 @@ async function updateStats() {
             `;
         }).join('');
 
-        const tasks = data.tasks || [];
+        const unfilteredTasks = data.tasks || [];
+        let tasks = unfilteredTasks;
+        tasks = tasks.filter(t => matchesCategoryFilter(t, globalThis.activeTaskFilter));
         const tList = document.getElementById('task-list');
         const existingTaskIds = new Set(tasks.map(t => t.task_id || t.filename));
 
@@ -541,11 +768,11 @@ async function updateStats() {
                     card.classList.remove('queued');
                 }
 
-                const icon = (t.type === '/asr' || t.type === 'Transcription' || t.type === 'ASR') ? 'record_voice_over' : 'translate';
+                const category = getTaskFilterCategory(t);
+                const icon = isAsrLikeCategory(category) ? 'record_voice_over' : 'translate';
                 const pulseClass = normalizedStatus === 'active' ? 'pulse' : '';
 
-                const typeLower = (t.type || "").toLowerCase();
-                const isAsr = typeLower.includes('asr') || typeLower.includes('trans');
+                const isAsr = isAsrLikeCategory(category);
 
                 const progressPct = t.progress || 0;
                 const stageText = normalizeStage({ ...t, status: normalizedStatus });
@@ -655,7 +882,7 @@ async function updateStats() {
                           const isUvr = t.type === 'Isolation' || (stageText.toLowerCase().includes('vocal') || stageText.toLowerCase().includes('separation') || stageText.toLowerCase().includes('uvr'));
                           
                           // Use helper function for speed/ETA calculation
-                          const result = calculateTaskSpeedAndEta(t, now, data.history, isUvr);
+                          const result = calculateTaskSpeedAndEta(t, now, historicalSpeeds, isUvr);
                           calculatedSpeed = result.calculatedSpeed;
                           remainingSeconds = result.remainingSeconds;
                       }
@@ -695,12 +922,16 @@ async function updateStats() {
                 }
             });
 
-            const activeIds = new Set(tasks.map(t => t.task_id || t.filename));
-            tList.querySelectorAll('.task-card').forEach(card => {
-                if (!activeIds.has(card.dataset.taskId)) {
-                    card.remove();
+
+            // Clean up old active tasks from timeline cache
+            if (typeof activeTaskTimeline !== 'undefined') {
+                const timelineActiveIds = new Set(unfilteredTasks.map(t => t.task_id || t.filename));
+                for (const id in activeTaskTimeline) {
+                    if (!timelineActiveIds.has(id)) {
+                        delete activeTaskTimeline[id];
+                    }
                 }
-            });
+            }
         }
 
 
@@ -709,7 +940,7 @@ async function updateStats() {
 }
 window.onload = () => {
     updateStats();
-    setInterval(updateStats, 2000);
+    startRefreshInterval();
     showTab('active');
     if (window.matchMedia) {
         window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {

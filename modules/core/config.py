@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 # --- [CORE SERVICE CONFIG] ---
 APP_NAME = "Whisper Pro ASR"
-VERSION = "1.1.4"
+VERSION = "1.1.5"
 HARDWARE_UNITS = []  # Global registry for accelerator orchestration
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 

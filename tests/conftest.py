@@ -71,6 +71,10 @@ class FlaskCompatibleResponse:
         """Get response body parsed as JSON."""
         return self._response.json()
 
+    def json(self):
+        """Get response JSON data."""
+        return self._response.json()
+
 
 class FlaskCompatibleClient:
     """Mock client wrapper compatible with Flask test assertions."""

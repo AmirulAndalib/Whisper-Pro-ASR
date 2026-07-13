@@ -120,15 +120,17 @@ def test_get_system_telemetry():
             mock_mem.return_value.percent = 50.0
             mock_mem.return_value.used = 8 * (1024**3)
             mock_mem.return_value.total = 16 * (1024**3)
-            with mock.patch("modules.core.utils._PROCESS_OBJ") as mock_proc:
-                mock_proc.cpu_percent.return_value = 5.0
-                mock_proc.memory_info.return_value.rss = 1024 * 1024 * 1024  # 1GB
+            with mock.patch("modules.core.utils.psutil.cpu_count", return_value=4):
+                with mock.patch("modules.core.utils._PROCESS_OBJ") as mock_proc:
+                    mock_proc.cpu_percent.return_value = 5.0
+                    mock_proc.memory_info.return_value.rss = 1024 * 1024 * 1024  # 1GB
 
-                telemetry = utils.get_system_telemetry()
-                assert telemetry["cpu_percent"] == 10.0
-                assert telemetry["memory_percent"] == 50.0
-                assert telemetry["app_cpu_percent"] == 5.0
-                assert telemetry["app_memory_gb"] == 1.0
+                    telemetry = utils.get_system_telemetry()
+                    assert telemetry["cpu_percent"] == 10.0
+                    assert telemetry["memory_percent"] == 50.0
+                    # Normalized by cpu_count=4 => 5.0/4 = 1.25 -> rounded to 1.2
+                    assert telemetry["app_cpu_percent"] == 1.2
+                    assert telemetry["app_memory_gb"] == 1.0
 
 
 def test_get_pretty_model_name():

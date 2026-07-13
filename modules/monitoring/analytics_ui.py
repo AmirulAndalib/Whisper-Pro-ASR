@@ -4,21 +4,16 @@ HTML template for the Whisper Pro Analytics Dashboard.
 
 import os
 
+from modules.monitoring import template_loader
+
 
 def get_analytics_html() -> str:
     """Returns the rendered HTML for the analytics page."""
     base_dir = os.path.dirname(__file__)
     templates_dir = os.path.join(base_dir, "templates")
 
-    template_path = os.path.join(templates_dir, "analytics.html")
-    css_path = os.path.join(templates_dir, "analytics.css")
+    html, css = template_loader.load_page_html_and_css(base_dir, "analytics.html", "analytics.css")
     js_path = os.path.join(templates_dir, "analytics.js")
-
-    with open(template_path, "r", encoding="utf-8") as f:
-        html = f.read()
-    with open(css_path, "r", encoding="utf-8") as f:
-        css = f.read()
-    with open(js_path, "r", encoding="utf-8") as f:
-        js = f.read()
+    js = template_loader.read_text_file(js_path)
 
     return html.replace("/* {{ANALYTICS_CSS}} */", css).replace("// {{ANALYTICS_JS}}", js)

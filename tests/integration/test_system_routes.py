@@ -225,3 +225,13 @@ def test_swagger_theme_static(client):
     response = client.get("/static/swagger-theme.css")
     assert response.status_code == 200
     assert b"prefers-color-scheme" in response.data
+
+
+def test_clear_telemetry(client):
+    """Test clearing telemetry history."""
+    with mock.patch("modules.monitoring.telemetry_manager.clear_telemetry_history") as mock_clear:
+        response = client.post("/system/telemetry/clear")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "success"
+        mock_clear.assert_called_once()

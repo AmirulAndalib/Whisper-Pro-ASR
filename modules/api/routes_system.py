@@ -7,12 +7,12 @@ import logging
 import os
 
 import anyio
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from modules.core import config, engine_registry, logging_setup, utils
 from modules.inference import model_manager
-from modules.monitoring import dashboard, history_manager
+from modules.monitoring import dashboard, history_manager, telemetry_manager
 
 router = APIRouter(tags=["System"])
 logger = logging.getLogger(__name__)
@@ -101,6 +101,21 @@ def clear_history():
     """
     history_manager.clear_history()
     return {"status": "success", "message": "History cleared"}
+
+
+@router.post("/system/telemetry/clear")
+def clear_telemetry() -> dict[str, str]:
+    """
+    Purge all telemetry history
+    ---
+    Clear all telemetry snapshots from the database.
+    """
+    try:
+        telemetry_manager.clear_telemetry_history()
+        return {"status": "success", "message": "Telemetry cleared"}
+    except OSError as e:
+        logger.error("[System] Failed to clear telemetry history: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to clear telemetry") from e
 
 
 @router.post("/system/cleanup")

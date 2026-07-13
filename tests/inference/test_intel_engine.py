@@ -1,5 +1,6 @@
 """Tests for modules/inference/intel_engine.py using mocks."""
 
+import importlib
 import sys
 from argparse import Namespace
 from unittest import mock
@@ -7,16 +8,17 @@ from unittest import mock
 import numpy as np
 import pytest
 
-# Mock OpenVINO GenAI before any imports
 mock_genai = mock.MagicMock()
-sys.modules["openvino_genai"] = mock_genai
-
-from modules.inference import intel_engine
+intel_engine = None
 
 
 @pytest.fixture(autouse=True)
-def reset_mocks():
-    """Reset mocks before each test."""
+def reset_mocks(monkeypatch):
+    """Reset and inject OpenVINO mocks before importing the module under test."""
+    global mock_genai, intel_engine
+    mock_genai = mock.MagicMock()
+    monkeypatch.setitem(sys.modules, "openvino_genai", mock_genai)
+    intel_engine = importlib.reload(importlib.import_module("modules.inference.intel_engine"))
     mock_genai.reset_mock()
     mock_genai.WhisperPipeline.side_effect = None
     mock_genai.WhisperPipeline.return_value = mock.MagicMock()
@@ -102,8 +104,13 @@ class TestIntelWhisperEngine:
 
             mock_get_timestamps.assert_called_once()
             engine.pipeline.generate.assert_called_once()
-            # Verify audio was masked (8000 samples @ 16kHz = 0.5s)
-            assert np.all(audio[8000:] == 0.0)
+            generated_audio = engine.pipeline.generate.call_args[0][0]
+            # Verify non-suppressed region remains unchanged.
+            assert np.all(generated_audio[:8000] == 1.0)
+            # Verify masked audio is used for inference (8000 samples @ 16kHz = 0.5s)
+            assert np.all(generated_audio[8000:] == 0.0)
+            # Original input should remain unchanged.
+            assert np.all(audio == 1.0)
 
     def test_transcribe_vad_no_speech(self):
         """Test early return when VAD finds no speech."""
@@ -167,6 +174,52 @@ class TestIntelWhisperEngine:
         assert len(segments) == 1
         assert segments[0].text == " Chunk"
         assert segments[0].start == 0.5
+
+    def test_apply_vad_mask_disjoint_segments(self):
+        """_apply_vad_mask should preserve only disjoint speech windows."""
+        engine = intel_engine.IntelWhisperEngine("/path/to/model")
+        audio = np.ones(32000, dtype=np.float32)
+        speech_ts = [{"start": 0.10, "end": 0.20}, {"start": 1.00, "end": 1.10}]
+
+        masked = engine._apply_vad_mask(audio, speech_ts)
+
+        assert np.all(masked[:1600] == 0.0)
+        assert np.all(masked[1600:3200] == 1.0)
+        assert np.all(masked[3200:16000] == 0.0)
+        assert np.all(masked[16000:17600] == 1.0)
+        assert np.all(masked[17600:] == 0.0)
+
+    def test_apply_vad_mask_boundary_timestamps(self):
+        """_apply_vad_mask should handle start/end timestamps at array boundaries."""
+        engine = intel_engine.IntelWhisperEngine("/path/to/model")
+        audio = np.ones(16000, dtype=np.float32)
+        speech_ts = [{"start": 0.0, "end": 0.25}, {"start": 0.75, "end": 1.0}]
+
+        masked = engine._apply_vad_mask(audio, speech_ts)
+
+        assert np.all(masked[:4000] == 1.0)
+        assert np.all(masked[4000:12000] == 0.0)
+        assert np.all(masked[12000:] == 1.0)
+
+    def test_apply_vad_mask_empty_audio(self):
+        """_apply_vad_mask should return an empty array for empty audio input."""
+        engine = intel_engine.IntelWhisperEngine("/path/to/model")
+        audio = np.array([], dtype=np.float32)
+
+        masked = engine._apply_vad_mask(audio, [{"start": 0.0, "end": 0.5}])
+
+        assert masked.size == 0
+
+    def test_apply_vad_mask_preserves_original_audio(self):
+        """_apply_vad_mask should not mutate the source audio buffer."""
+        engine = intel_engine.IntelWhisperEngine("/path/to/model")
+        audio = np.ones(16000, dtype=np.float32)
+        original = audio.copy()
+
+        masked = engine._apply_vad_mask(audio, [{"start": 0.0, "end": 0.5}])
+
+        assert np.all(audio == original)
+        assert np.all(masked[8000:] == 0.0)
 
 
 def test_intel_engine_exceptions():

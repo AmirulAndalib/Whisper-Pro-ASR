@@ -76,16 +76,34 @@ services:
 
 ## Frontend Quality Gates
 
-Dashboard UI quality is validated with ESLint, Stylelint, and Vitest coverage gates.
+Dashboard UI quality is validated with ESLint, Stylelint, Vitest coverage gates, and mandatory Playwright E2E tests.
 
 ```bash
+npx playwright install --with-deps chromium
 npm run lint:js
 npm run lint:css
 npm run test:js
+npm run test:e2e
 npm run quality:frontend
 ```
 
+## Python Quality Gates
+
+Backend quality checks run in CI and local parity scripts with a strict lint stack.
+
+Local parity pipeline runs (`scripts/ci/build-and-test.sh` and `scripts/ci/build-and-test.ps1`) always regenerate and overwrite `assets/coverage.svg` from the latest successful coverage results.
+
+```bash
+python3 -m ruff format --check .
+python3 -m ruff check .
+python3 -m flake8 modules whisper_pro_asr.py tests tests/check_coverage.py
+python3 -m pylint modules whisper_pro_asr.py tests
+```
+
+Flake8 policy is strict: `max-line-length = 140` with no ignore directives.
+
 Coverage policy for monitored dashboard JavaScript files (`modules/monitoring/templates/*.js`):
+
 - Per-file minimum `90%` for `lines` and `statements`.
 - CI fails when any monitored file drops below threshold.
 
@@ -94,17 +112,20 @@ CodeRabbit review guidance is stored in [.coderabbit.yaml](.coderabbit.yaml) and
 ## 🚀 Key Features
 
 ### 🗣 Speaker Diarization
+
 - **WhisperX Integration**: Identify who said what with automatic speaker diarization powered by WhisperX alignment and PyAnnote speaker segmentation.
 - **Speaker Labels**: Output formats (SRT, VTT, TXT, TSV) include speaker identification labels (e.g., `[SPEAKER_00]: Hello world`).
 - **Configurable Speakers**: Control diarization with `min_speakers` and `max_speakers` parameters for optimal speaker count estimation.
 - **Graceful Fallback**: If diarization fails or `HF_TOKEN` is not configured, the system seamlessly falls back to standard transcription.
 
 ### Precision Architecture
+
 - **Multi-Backend Support**: Specialized optimization profiles for **NVIDIA CUDA**, **Intel OpenVINO**, and **Generic CPU** runtimes.
 - **Re-entrant Hardware Orchestration**: Utilizes a sophisticated thread-local locking system (`model_lock_ctx` in `scheduler.py`) that allows complex pipelines (UVR → ASR → Diarization) to share a single hardware claim without deadlocking.
 - **FFmpeg 8.1.0 Integration**: Features optimized hardware-accelerated decoding. All media (MKV, AVI, MP4, etc.) is automatically standardized to **16kHz Mono WAV** using the `utils.py` core before entering the AI pipeline for maximum accuracy.
 
 ### Advanced Intelligence
+
 - **FIFO Fairness with Priority Yielding**: Tasks are processed in arrival order within the same priority tier. High-priority language detection still preempts ASR when needed, but detect-language requests are also processed FIFO among themselves.
 - **Deterministic Dashboard Ordering**: Active and historical task cards are rendered in arrival order (`start_time`) so operators see the same sequence tasks entered the system.
 - **Intel ASR Chunking & Streaming**: Refactored OpenVINO engine transcription to split long media files dynamically into structured chunks guided by speech VAD timestamps, ensuring stability on very long movies.
@@ -132,8 +153,8 @@ CodeRabbit review guidance is stored in [.coderabbit.yaml](.coderabbit.yaml) and
 - **On-Demand History Tiering**: Implements a dual-tier storage strategy. The dashboard and RAM are strictly capped at the last 20 tasks, while a durable history of up to 1000 tasks is maintained on the persistent volume.
 - **Hardened Diagnostic Logging**: System logs (`whisper_pro.log`) are redirected to the persistent state volume with real-time flush-to-disk logic. Log downloads are served via atomic in-memory reads to prevent `RuntimeError: Response content longer than Content-Length` failures that occur when the log file is actively written during download. Zero-caching headers ensure the latest diagnostic data is always delivered.
 
-
 ### Production Ready
+
 - **OpenAI Standard API**: Drop-in compatible with the OpenAI whisper specification, allowing immediate integration with existing clients.
 - **Endpoint Taxonomy (Contract)**: `/asr` and `/v1/audio/...` are equivalent standard-priority ASR surfaces, while `/detect-language` (and alias `/detectlang`) is the high-priority language-identification surface.
 - **Interactive Documentation**: Full OpenAPI/Swagger interface available at `/docs` for testing and endpoint exploration.
@@ -141,13 +162,13 @@ CodeRabbit review guidance is stored in [.coderabbit.yaml](.coderabbit.yaml) and
 - **Persistent History Dashboard**: Maintains a durable log of all ASR and Language Detection tasks. Completed transcriptions are stored indefinitely and can be downloaded as `.srt` files directly from the dashboard.
 - **Industrial Telemetry**: Real-time progress monitoring, including completion percentages (%), segment counts (`Seg 11 | 01:20 / 05:00`), active processing stages (e.g., UVR Preprocessing, Transcribing), and detailed hardware state reporting.
 - **Granular Performance Auditing**: Every task provides a detailed breakdown of its execution phases, including exact time spent in **Queue**, **Vocal Isolation**, and **AI Inference**.
-- **Material Design Dashboard**: A comprehensive monitoring interface at `/dashboard` (or the root `/` when accessed via browser) featuring live task progress bars, system resource visualization, real-time auto-scrolling logs, and a **Live Refresh** toggle for manual inspection.
+- **Material Design Dashboard**: A comprehensive monitoring interface at `/dashboard` (or the root `/` when accessed via browser) featuring live task progress bars, system resource visualization, real-time auto-scrolling logs, and a **Live Refresh** toggle with fixed polling intervals (1s, 2s, 5s, 10s).
 - **Bazarr Optimized**: Purpose-built for high-volume subtitle automation with stable SRT, VTT, and verbose JSON output formats. Fully compatible with `whisper-asr-webservice` API.
 
 ---
 
-
 ### 🧩 Hardware Compatibility Matrix
+
 | Pipeline Stage | CPU (Generic) | NVIDIA (CUDA) | Intel iGPU / Arc | Intel NPU |
 | :--- | :---: | :---: | :---: | :---: |
 | **Media Standardization** | ✅ | ✅ | ✅ | ✅ |
@@ -157,6 +178,7 @@ CodeRabbit review guidance is stored in [.coderabbit.yaml](.coderabbit.yaml) and
 | **Speaker Diarization** | ✅ | ✅ | ✅ | ✅ |
 
 ### System Architecture
+
 The service utilizes a **Heterogeneous Model Pool** to orchestrate tasks across NVIDIA GPUs, Intel NPUs, and CPUs simultaneously, with integrated WhisperX diarization and configurable model lifecycle management. For a deep dive into the processing pipelines, resource locking, and hardware acceleration logic, see the [Technical Architecture](docs/ARCHITECTURE.md) documentation.
 
 > [!TIP]
@@ -165,6 +187,7 @@ The service utilizes a **Heterogeneous Model Pool** to orchestrate tasks across 
 ---
 
 ## Prerequisites
+
 - **Silicon**: Any CPU or Intel GPU/NPU or NVIDIA Pascal+ GPU.
 - **Environment**: Docker Engine 20.10+ / Docker Desktop.
 - **NPU Requirements**: Latest Intel NPU driver package (NPU Plugin).
@@ -202,12 +225,12 @@ The service is highly tunable via environment variables in `docker-compose.yml`.
 | `ASR_THREADS` | `4` | CPU core allocation for inference (Auto-capped by hardware). |
 | `ASR_PREPROCESS_THREADS` | `4` | CPU core allocation for UVR/ONNX (Auto-capped by hardware). |
 | **SSD Protection** | | |
-| `WHISPER_TEMP_DIR`| `/tmp/whisper`| Redirects transient I/O (uploads, WAVs, stems) to this path. |
+| `WHISPER_TEMP_DIR` | `/tmp/whisper` | Redirects transient I/O (uploads, WAVs, stems) to this path. |
 | `WHISPER_TEMP_MIN_FREE_MB` | `2048` | Fallback threshold to disk if RAM-disk is full. |
 | **Preprocessing** | | |
-| `ENABLE_VOCAL_SEPARATION`| `true` | Toggles UVR background removal engine for translate/transcribe. |
+| `ENABLE_VOCAL_SEPARATION` | `true` | Toggles UVR background removal engine for translate/transcribe. |
 | `UVR_CHUNK_DURATION` | `600` | Chunk duration in seconds for UVR separation (0 to disable). |
-| `ENABLE_LD_PREPROCESSING`| `true` | Toggles UVR background removal engine for language detection. |
+| `ENABLE_LD_PREPROCESSING` | `true` | Toggles UVR background removal engine for language detection. |
 | `LD_VAD_THRESHOLD` | `0.3` | Aggressiveness of VAD during language identification (0.0 to 1.0). |
 | `SMART_SAMPLING_SEARCH` | `true` | Enables localized entropy-based signal searching in sparse audio. |
 | `MAX_CUDA_UNITS` | `1` | Max NVIDIA GPUs to utilize (supports `ALL`, `AUTO`). |
@@ -236,9 +259,9 @@ When `ASR_ENGINE` is set explicitly, unsupported values are rejected at startup 
 ---
 
 ## 📜 Full `docker-compose.yml` Example
- 
+
 For an exhaustive deployment featuring all optimization toggles and hardware passthrough options:
- 
+
 ```yaml
 services:
   whisper-pro-asr:
@@ -325,21 +348,24 @@ services:
       - /mnt/nas/tv:/tv
       - /mnt/nas/movies:/movies
 ```
- 
+
 ---
- 
+
 ## API Reference
 
 Comprehensive Swagger documentation is hosted at **`/docs`**.
 
 ### 1. Identify Language
+
 **POST** `/detect-language`  
 Performs multi-zone analysis to identify source language metadata. Returns full language names (e.g., "English") for Bazarr compatibility.
 
 ### 2. Transcribe Media
+
 **POST** `/asr`  
 **POST** `/v1/audio/transcriptions`  
 Main entry point for generating subtitles with optional speaker diarization.
+
 - **Formats**: `srt` (default), `vtt`, `txt`, `tsv`, `json` (with segments).
 - **Diarization**: Add `diarize=true` to enable speaker identification (requires `HF_TOKEN`).
 - **ASR Tuning**: `initial_prompt`, `vad_filter`, `word_timestamps` for fine-grained control.
@@ -349,6 +375,7 @@ Main entry point for generating subtitles with optional speaker diarization.
 - **Optimization**: Prioritizes local file access if the path exists (via volume mapping), otherwise accepts file uploads.
 
 ### 3. Service Analytics & Dashboard
+
 **GET** `/status`  
 Health-check endpoint returning model metadata, hardware status, and versioning information.
 
@@ -367,24 +394,27 @@ View or dynamically update service configuration (model, device, telemetry reten
 
 To use this service with **Bazarr**:
 
-1.  **Provider**: Choose **Whisper** (or `whisper-asr-webservice`).
-2.  **Endpoint**: `http://<YOUR_DOCKER_IP>:9000`
-3.  **Timeouts**: Should be set very high (54000) for long movies
-4.  **Pass video filename to Whisper**: Should be enabled for volume mapping to work correctly
-3.  **Volume Mapping (Highly Recommended)**:
-  - Ensure your Bazarr and Whisper-Pro-ASR containers share the same media paths (e.g., both map `/tv` to the same actual folder).
-  - When configured this way, Bazarr sends the *file path* to Whisper. Whisper Pro checks if it can read that path locally. If yes, it uses the mapped file directly and skips upload materialization.
-  - If paths don't match, Whisper Pro automatically falls back to handling the full file upload from Bazarr.
+1. **Provider**: Choose **Whisper** (or `whisper-asr-webservice`).
+2. **Endpoint**: `http://<YOUR_DOCKER_IP>:9000`
+3. **Timeouts**: Should be set very high (54000) for long movies
+4. **Pass video filename to Whisper**: Should be enabled for volume mapping to work correctly
+5. **Volume Mapping (Highly Recommended)**:
+
+- Ensure your Bazarr and Whisper-Pro-ASR containers share the same media paths (e.g., both map `/tv` to the same actual folder).
+- When configured this way, Bazarr sends the *file path* to Whisper. Whisper Pro checks if it can read that path locally. If yes, it uses the mapped file directly and skips upload materialization.
+- If paths don't match, Whisper Pro automatically falls back to handling the full file upload from Bazarr.
 
 ---
 
 ## Performance Notes
+
 - **Golden Configuration**: We recommend **Large-V3** with **Batch=1** and **Beam=5** for the majority of CPU/GPU workloads.
 - **VRAM/RAM Requirements**: Ensure at least **16GB of System RAM** when running both Vocal Isolation and Large-V3.
 
 ---
 
 ## 🛠 Project Structure
+
 ```text
 /
 ├── whisper_pro_asr.py        # Master entry point

@@ -5,11 +5,11 @@
 
 # Whisper Pro ASR (Multilingual)
 
-**Whisper Pro ASR** is a high-performance, production-ready AI transcription service with **speaker diarization**. It is optimized for **Whisper Large V3** and designed for seamless integration with **Bazarr** and the *arr stack. 
+**Whisper Pro ASR** is a high-performance, production-ready AI transcription service with **speaker diarization**. It is optimized for **Whisper Large V3** and designed for seamless integration with **Bazarr** and the *arr stack.
 
 It features native hardware acceleration for **Intel Core Ultra (NPU)**, **Intel iGPUS/Arc**, and **NVIDIA CUDA**, offloading heavy AI tasks from your CPU for industrial-grade speed.
 
-Concurrency correctness is the top engineering priority: detect-language preemption is cooperative and unit-aware, critical priority waits are intentionally unbounded under saturation, and scheduler liveness is continuously validated by test gates.
+Concurrency correctness is the top engineering priority: detect-language preemption is cooperative and unit-aware, critical priority waits remain indefinite under saturation (never failing immediately on simple scheduler timeout), and scheduler liveness is continuously validated by test gates.
 
 ---
 
@@ -75,11 +75,11 @@ Deploy with: `docker compose up -d`
 
 To use this service with **Bazarr**:
 
-1.  **Provider**: Choose **Whisper** (or `whisper-asr-webservice`).
-2.  **Endpoint**: `http://<WHISPER-PRO-ASR_DOCKER_IP/whisper-pro-asr>:9000`
-3.  **Timeouts**: Should be set very high (54000) for long movies
-4.  **Pass video filename to Whisper**: Should be enabled for volume mapping to work correctly
-3.  **Volume Mapping (Highly Recommended)**:
+1. **Provider**: Choose **Whisper** (or `whisper-asr-webservice`).
+2. **Endpoint**: `http://<IP_OR_HOSTNAME>:9000`
+3. **Timeouts**: Should be set very high (54000) for long movies
+4. **Pass video filename to Whisper**: Should be enabled for volume mapping to work correctly
+5. **Volume Mapping (Highly Recommended)**:
     - Ensure your Bazarr and Whisper-Pro-ASR containers share the same media paths (e.g., both map `/tv` to the same actual folder).
     - When configured this way, Bazarr sends the *file path* to Whisper. Whisper Pro checks if it can read that path locally. If yes, it processes the file instantly without network overhead.
     - If paths don't match, Whisper Pro automatically falls back to handling the full file upload from Bazarr.
@@ -103,8 +103,10 @@ To use this service with **Bazarr**:
 - **Service Analytics Dashboard**: Dedicated `/analytics` page with interactive charts showing cumulative and daily breakdown of task counts and durations, categorized by endpoint (/asr, /detect-language, /v1/audio/...).
 - **Runtime Configuration**: Dynamic `/settings` endpoint allows model, device, and retention changes without container restart.
 - **Telemetry Downsampling**: Dual-layer downsampling (server + client) caps chart data at 300 points for smooth dashboard rendering during extended operation.
+- **Strict Lint Baseline**: CI/local parity enforces Ruff + Flake8 + Pylint on Python sources, with Flake8 configured at 140 chars and no ignore directives.
 
 ### 🧩 Hardware Compatibility Matrix
+
 | Pipeline Stage | CPU (Generic) | NVIDIA (CUDA) | Intel iGPU / Arc | Intel NPU |
 | :--- | :---: | :---: | :---: | :---: |
 | **Media Standardization** | ✅ | ✅ | ✅ | ✅ |
@@ -150,18 +152,21 @@ To use this service with **Bazarr**:
 ---
 
 ## 📦 Persistence
+
 Mapping the following volumes is **strongly recommended**:
 
-1.  **`/app/model_cache`**: Stores downloaded AI models, WhisperX alignment models, PyAnnote diarization models, and pre-compiled OpenVINO NPU/GPU blobs. Reduces startup time from minutes to milliseconds.
-2.  **`/app/data`**: Stores the persistent state of the application, including task history, telemetry statistics, and system logs. Mapping this ensures your history survives container restarts and updates.
+1. **`/app/model_cache`**: Stores downloaded AI models, WhisperX alignment models, PyAnnote diarization models, and pre-compiled OpenVINO NPU/GPU blobs. Reduces startup time from minutes to milliseconds.
+2. **`/app/data`**: Stores the persistent state of the application, including task history, telemetry statistics, and system logs. Mapping this ensures your history survives container restarts and updates.
 
 ## 🐳 GPU/NPU Support
 
 ### NVIDIA GPU (CUDA)
+
 - Install [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/)
 - Ensure you have current NVIDIA drivers on the host.
 
 ### Intel NPU/GPU
+
 - Mapping `/dev/dri` and `/dev/accel` is recommended for native Linux access.
 - For Windows/WSL2, ensure `/dev/dxg` is mapped.
 

@@ -46,6 +46,11 @@
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+html {
+    max-width: 100%;
+    overflow-x: hidden;
+}
+
 body {
     font-family: 'Roboto', sans-serif;
     background-color: var(--md-sys-color-background);
@@ -57,6 +62,8 @@ body {
     max-width: 1600px;
     margin: 0 auto;
     transition: background-color 0.3s, color 0.3s;
+    width: 100%;
+    overflow-x: hidden;
 }
 
 header {
@@ -228,3 +235,24 @@ tr:hover td {
     text-align: right;
     margin-top: 12px;
 }
+
+@media (max-width: 768px) {
+    .btn-action {
+        flex: 1 1 auto;
+        justify-content: center;
+    }
+}
+
+@media (max-width: 600px) {
+    table {
+        font-size: 12px;
+    }
+    th, td {
+        padding: 8px 10px;
+    }
+    .table-card {
+        padding: 16px;
+        border-radius: 16px;
+    }
+}
+

@@ -1,3 +1,4 @@
+/* global describe, it, expect, beforeEach, vi */
 const path = require("path");
 const { JSDOM } = require("jsdom");
 const { loadScriptInContext } = require("./helpers");

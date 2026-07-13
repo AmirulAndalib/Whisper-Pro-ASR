@@ -6,7 +6,6 @@ omit =
     tests/*
     */tests/*
     */__pycache__/*
-    check_coverage.py
     scripts/*
 
 

@@ -186,7 +186,7 @@ async def get_request_params(request: Request, form_data: dict):
     except (ValueError, TypeError):
         params["max_speakers"] = None
 
-    params["hf_token"] = query_params.get("hf_token") or form_data.get("hf_token") or request.headers.get("X-HF-Token")
+    params["hf_token"] = form_data.get("hf_token") or request.headers.get("X-HF-Token")
 
     # New ASR parameters
     params["initial_prompt"] = query_params.get("initial_prompt") or form_data.get("initial_prompt")
