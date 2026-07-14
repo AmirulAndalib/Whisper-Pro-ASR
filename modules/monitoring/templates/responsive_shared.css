@@ -1,0 +1,45 @@
+@media (max-width: 768px) {
+    body {
+        padding: 16px;
+        gap: 16px;
+    }
+    header {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 16px;
+    }
+    .header-title {
+        justify-content: center;
+    }
+    .header-actions {
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 8px;
+        width: 100%;
+    }
+}
+
+@media (max-width: 600px) {
+    .chart-card {
+        padding: 16px;
+        border-radius: 16px;
+    }
+}
+
+@media (max-width: 480px) {
+    body {
+        padding: 12px;
+        gap: 12px;
+    }
+    .stats-grid {
+        grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+        gap: 12px;
+    }
+    .card {
+        padding: 12px;
+        border-radius: 12px;
+    }
+    .card-value {
+        font-size: 18px;
+    }
+}

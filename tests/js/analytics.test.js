@@ -1,3 +1,4 @@
+/* global describe, it, expect, beforeEach, vi */
 const path = require("path");
 const { JSDOM } = require("jsdom");
 const { evalInContext, loadScriptInContext, createMatchMediaStub } = require("./helpers");
@@ -168,9 +169,11 @@ describe("analytics.js", () => {
   });
 
   it("onload registers dark-mode listener and rerenders only when rawData exists", async () => {
-    let listener = null;
-    const fetchSpy = vi.spyOn(context, "fetchAnalytics").mockResolvedValue();
-    context.window.matchMedia = () => ({
+    vi.useFakeTimers();
+    try {
+      let listener = null;
+      const fetchSpy = vi.spyOn(context, "fetchAnalytics").mockResolvedValue();
+      context.window.matchMedia = () => ({
       matches: false,
       addEventListener: (_evt, cb) => {
         listener = cb;
@@ -189,5 +192,8 @@ describe("analytics.js", () => {
     evalInContext(context, "rawData = { cumulative: {}, daily: {} }");
     listener();
     expect(renderSpy).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

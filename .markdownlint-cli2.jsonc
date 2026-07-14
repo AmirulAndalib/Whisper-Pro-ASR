@@ -1,0 +1,16 @@
+{
+  "globs": [
+    "**/*.md",
+    "!.venv/**",
+    "!node_modules/**",
+    "!coverage-js/**",
+    "!playwright-report/**",
+    "!test-results/**"
+  ],
+  "config": {
+    "default": true,
+    "MD013": false,
+    "MD033": false,
+    "MD041": false
+  }
+}

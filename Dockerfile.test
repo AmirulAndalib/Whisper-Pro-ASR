@@ -7,7 +7,7 @@ ENV PYTHONUNBUFFERED=1
 # Install system dependencies (cached)
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y ffmpeg git build-essential
+    apt-get update && apt-get install -y ffmpeg git build-essential nodejs npm
 
 # Set working directory early
 WORKDIR /app
@@ -18,27 +18,47 @@ COPY pyproject.toml poetry.lock* ./
 
 # Install Poetry and project dependencies (using cache mount for pip/poetry caches)
 RUN --mount=type=cache,target=/root/.cache \
-    pip install poetry setuptools && \
+    pip install poetry "setuptools==80.9.0" && \
     poetry config virtualenvs.create false && \
     poetry config installer.max-workers 1 && \
-    poetry install --no-root --only dev
+    poetry install --no-root --without ml && \
+    PYTHONWARNINGS="ignore::DeprecationWarning" python -c "import coverage_badge, pkg_resources"
 
 
 # Stage 2: Lint - Run static analysis (cached by Docker)
 FROM base AS lint
 # Copy the rest of the source code (cached after deps are installed)
 COPY . .
-RUN yamllint -c .yamllint . && \
-    ruff format --check . && \
-    ruff check . && \
-    pylint modules whisper_pro_asr.py tests
+RUN set -eux && \
+    echo "--- Installing Node-based lint dependencies (cached) ---" && \
+    npm ci && \
+    echo "--- Running Markdownlint (verbose) ---" && \
+    npm run lint:md && \
+    echo "--- Running Yamllint (verbose) ---" && \
+    yamllint -f parsable -c .yamllint . && \
+    echo "--- Running Ruff Format Check (verbose) ---" && \
+    ruff format --check -v . && \
+    echo "--- Running Ruff Lint Check (verbose) ---" && \
+    ruff check -v . && \
+    echo "--- Running Flake8 (verbose) ---" && \
+    flake8 -v modules whisper_pro_asr.py tests tests/check_coverage.py && \
+    echo "--- Running Pylint (verbose) ---" && \
+    pylint -v modules whisper_pro_asr.py tests tests/check_coverage.py
 
 # Stage 3: Test - Final image for running integration tests
 FROM base AS test
 ENV POETRY_HTTP_TIMEOUT=1800
 ENV PIP_DEFAULT_TIMEOUT=1800
 
-# Copy the rest of the source code (cached after deps are installed)
+# Copy frontend dependency manifests first so npm install is source-change resistant.
+COPY package.json package-lock.json ./
+
+# Install frontend and markdown tooling dependencies used by quality gates executed inside tests/run_suite.sh
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci && \
+    npx playwright install --with-deps chromium
+
+# Copy the rest of the source code after dependency layers.
 COPY . .
 
 # Ensure the test script has Unix line endings and is executable

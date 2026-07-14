@@ -13,10 +13,11 @@ The architecture is concurrency-first: deadlock/livelock safety and bounded prog
 ## 🧬 Module Ecosystem
 
 ### Core Runtime Modules (`modules/core/`)
+
 All core runtime modules are consolidated under `modules/core/` for improved organization and import clarity:
 
 | Component | Responsibility |
-|:---|:---|
+| :--- | :--- |
 | `modules/core/bootstrap.py` | Hardware path patching and library redirection. Ensures correct hardware-optimized libraries are injected into `sys.path` before any AI modules are imported. |
 | `modules/core/config.py` | Centralized hardware detection (CUDA/NPU/iGPU), unit pool initialization, and feature flags (`HF_TOKEN`, `MODEL_IDLE_TIMEOUT`, `INITIAL_PROMPT`). |
 | `modules/core/logging_setup.py` | Orchestrates hardware banners and thread-local context filtering. |
@@ -25,13 +26,15 @@ All core runtime modules are consolidated under `modules/core/` for improved org
 | `modules/core/subtitles.py` | Subtitle format generation (SRT, VTT, TSV, TXT) with text wrapping, speaker labels, and layout customization. |
 
 ### Application Modules
+
 | Component | Responsibility |
-|:---|:---|
+| :--- | :--- |
 | `modules/inference/` | Core logic for `model_manager` (transcription, diarization, idle monitoring), `scheduler` (re-entrant locks), `preprocessing` (UVR), `vad`, `language_detection` (batch language ID pipeline), `engine_factory` (backend selection), `intel_engine`, `diarization`, and `post_processing`. |
 | `modules/api/` | FastAPI application layer: `routes_asr` (transcription), `routes_detect` (language detection), `routes_system` (dashboard, settings, analytics, history), and `routes_utils` (shared request utilities, file upload handling, cleanup). |
 | `modules/monitoring/` | `dashboard` & `dashboard_ui` (Material Design UI renderer utilizing modular `templates/` CSS/JS components), `analytics_ui` (analytics dashboard dynamically loaded from modular `templates/` assets), `telemetry` & `telemetry_manager` (persistent telemetry history), `history_manager` (task history with dual-tier storage), and `metrics_discovery` (hardware metrics). |
 
 ### 🧩 Hardware Compatibility Matrix
+
 | Pipeline Stage | CPU (Generic) | NVIDIA (CUDA) | Intel iGPU / Arc | Intel NPU |
 | :--- | :---: | :---: | :---: | :---: |
 | **Media Standardization** | ✅ | ✅ | ✅ | ✅ |
@@ -45,6 +48,7 @@ All core runtime modules are consolidated under `modules/core/` for improved org
 ## 🏎 Processing Pipelines
 
 ### Transcription Flow (/asr)
+
 ```mermaid
 graph TD
     EP["Endpoint Surface: /asr or /v1/audio/..."] --> A["Source Media"]
@@ -82,6 +86,7 @@ graph TD
 ```
 
 ### Speaker Diarization Pipeline
+
 ```mermaid
 graph LR
     SEG["Raw Segments"] --> ALIGN["whisperx.align()"]
@@ -96,6 +101,7 @@ graph LR
 ```
 
 ### Priority Detection Flow (/detect-language)
+
 ```mermaid
 graph TD
     START["Detection Request: /detect-language or /detectlang"] --> SAMPLING["Strategic Sampling: 1-15 Zones"]
@@ -124,15 +130,18 @@ graph TD
 ## 🔒 Granular Resource Orchestration
 
 ### 1. Re-entrant Hardware Locks
+
 The system implements a **Thread-Local Re-entrant Locking Pattern** via `model_lock_ctx()`. This allows a high-level task (like a full transcription request) to "claim" a hardware unit once and share it across all internal sub-stages:
-1.  **Vocal Isolation (UVR)**
-2.  **Language Identification (Whisper)**
-3.  **ASR Transcription (Whisper)**
-4.  **Speaker Diarization (WhisperX)**
+
+1. **Vocal Isolation (UVR)**
+2. **Language Identification (Whisper)**
+3. **ASR Transcription (Whisper)**
+4. **Speaker Diarization (WhisperX)**
 
 This prevents deadlocks where a task might release a unit between stages and be unable to reclaim it due to high queue volume.
 
 ### 2. Deadlock-Free Priority Resumption
+
 The system utilizes a **Cooperative Yielding** pattern combined with an automated `release_priority` cleanup. High-priority tasks (like `/detect-language`) can signal active transcriptions to pause. Priority tasks are not globally serialized and may run in parallel across multiple available/borrowed units, while same-priority FIFO ordering is preserved at acquisition boundaries. Once a priority task completes, the context manager automatically triggers unit-scoped resumption signaling, ensuring paused tasks continue exactly where they left off.
 
 - **Standard Task Yielding**: Standard tasks yield resource acquisition and loop-sleep instead of blocking on the model lock semaphore whenever priority tasks are present in the registry, preventing priority starvation.
@@ -144,10 +153,11 @@ The system utilizes a **Cooperative Yielding** pattern combined with an automate
 - **Centralized Storage Hygiene**: Implements a `tracked_files` registry within the thread context. Every transient file (uploaded media, standardized WAVs, HQ prepared files, and isolated stems) is registered upon creation. A mandatory `cleanup_files()` call in the request's `finally` block ensures a **100% deletion rate**, eliminating storage leaks even after fatal errors.
 
 ### 3. Model Lifecycle & Idle Timeout
+
 The system supports two model lifecycle strategies, configured via environment variables:
 
 | Strategy | Config | Behavior |
-|:---|:---|:---|
+| :--- | :--- | :--- |
 | **Aggressive Offload** | `AGGRESSIVE_OFFLOAD=false` | Models are unloaded from memory immediately when active sessions drop to zero. |
 | **Idle Timeout** | `MODEL_IDLE_TIMEOUT=300` (default) | A deferred `threading.Timer` is started after the last task completes. Models are only purged after the configured idle period (in seconds) elapses with zero active sessions. New incoming tasks cancel the pending timer, keeping models warm for bursty workloads. |
 
@@ -172,17 +182,20 @@ graph TD
 ```
 
 ### 4. Real-time Observability Engine
+
 The system features a thread-aware logging and telemetry engine designed for industrial reliability:
+
 - **Hardened Diagnostic Logging**: Implements a persistent, idempotent logging architecture. The `whisper_pro.log` stream is guaranteed across application lifecycles via a hardened initialization sequence that survives global resets.
 - **Thread-Isolated Buffers**: Utilizing a custom `TaskLogFilter`, logs are redirected to a thread-local buffer (`TASK_LOGS`) in real-time. This allows the dashboard to display execution logs specific to an active task without inter-thread noise.
 - **Real-Time Synchronization**: The log download endpoint features a mandatory flush-to-disk sequence and zero-caching headers, ensuring diagnostics are always current.
 - **Telemetry Downsampling**: A dual-layer downsampling strategy caps telemetry data at 300 points for dashboard chart rendering. Server-side downsampling in `telemetry.py` reduces payloads before transmission, while client-side downsampling in `dashboard_ui.py` provides an additional safety net for chart performance.
 - **Service Analytics**: The `/analytics` endpoint and dedicated analytics UI (`analytics_ui.py`) provide cumulative and daily breakdowns of task counts, durations, and usage patterns separated by HTTP endpoint surface (`/asr`, `/detect-language`/`/detectlang`, and `/v1/audio/...`) from persistent task history. The analytics dashboard is dynamically composed of modular HTML, CSS, and JS components under `templates/`.
-- **Industrial Quality Standard**: The entire ecosystem is maintained with a strict **10.00/10 Pylint score**, strict **Ruff static analysis and formatting compliance**, and **>90% test coverage** across all modules and tests, representing a zero-regression baseline for enterprise deployments.
+- **Industrial Quality Standard**: The entire ecosystem is maintained with a strict **10.00/10 Pylint score**, strict **Ruff static analysis and formatting compliance**, strict **Flake8 compliance** (`max-line-length=140`, no ignore directives), and **>90% test coverage** across all modules and tests, representing a zero-regression baseline for enterprise deployments.
 - **Incremental Dashboard Updates**: The monitoring UI utilizes an incremental DOM update pattern to maintain scroll positions in log buffers and live streams while polling the `/status` endpoint every 2 seconds. The HTML dashboard UI is structured as a collection of modular CSS and JS components loaded from `modules/monitoring/templates/`.
 - **O(1) Live Subtitle Updates**: Appends pre-formatted subtitle blocks incrementally to the live SRT display stream during processing instead of doing full $O(N^2)$ stream reconstructions, preventing performance bottlenecks and memory bloat on large media files.
 
 ### 5. Long-Movie Processing & Audio Chunking
+
 - **Intel ASR Chunking & Streaming**: Refactored OpenVINO engine transcription (`IntelWhisperEngine`) to split long media files dynamically into structured chunks (configured via `INTEL_ASR_CHUNK_DURATION`, default 300 seconds), guided by speech VAD timestamps (`find_split_points()`), and auto-detecting/locking the language on the first chunk to ensure stability on very long movies.
 - **UVR Chunk Progress Tracking**: Patches the UVR vocal separation process dynamically on the scheduler to compute and emit real-time chunk progress status according to `UVR_CHUNK_DURATION` (default 600 seconds) to prevent visual hangs.
 - **Graceful Temp-Storage Fallback**: Establishes a 2GB minimum free space threshold and 1.5x file-size headroom multiplier to fallback gracefully to persistent storage (`PERSISTENT_TEMP_DIR`) when tmpfs runs low on space.
@@ -190,6 +203,7 @@ The system features a thread-aware logging and telemetry engine designed for ind
 ---
 
 ## 🏛 Hardware Interface & Host Dependencies
+
 - **Intel NPU/GPU**: Leverages `/dev/dri` and `/dev/accel` nodes.
 - **NVIDIA CUDA**: Requires the **NVIDIA Container Toolkit** on the host.
 - **SSD Optimization**: All transient I/O is redirected to a RAM-backed `tmpfs` volume to prevent physical wear.

@@ -50,6 +50,7 @@ function renderCharts() {
             cpu_sys: p.cpu_sys || 0,
             cpu_app: p.cpu_app || 0,
             mem_app_gb: p.mem_app_gb || 0,
+            mem_sys_gb: p.mem_sys_gb || 0,
             nvidia_util: p.nvidia_util || []
         };
     });
@@ -57,7 +58,8 @@ function renderCharts() {
     // Extract CPU data for charts and stats
     const cpuSysData = dataPoints.map(p => (p && p.system) ? p.system.cpu_percent : (p ? p.cpu_sys : null));
     const cpuAppData = dataPoints.map(p => (p && p.system) ? p.system.app_cpu_percent : (p ? p.cpu_app : null));
-    const memData = dataPoints.map(p => (p && p.system) ? p.system.app_memory_gb : (p ? p.mem_app_gb : null));
+    const memAppData = dataPoints.map(p => (p && p.system) ? (p.system.app_memory_gb || 0) : (p ? p.mem_app_gb : null));
+    const memSysData = dataPoints.map(p => (p && p.system) ? (p.system.memory_used_gb || 0) : (p ? p.mem_sys_gb : null));
     
     // Calculate current and highest for CPU
     const cpuSysFiltered = cpuSysData.filter(v => v !== null && v !== undefined && !isNaN(v));
@@ -68,9 +70,13 @@ function renderCharts() {
     const cpuAppHighest = cpuAppFiltered.length > 0 ? Math.max(...cpuAppFiltered) : 0;
     
     // Calculate current and highest for memory
-    const memFiltered = memData.filter(v => v !== null && v !== undefined && !isNaN(v));
-    const memCurrent = memFiltered.length > 0 ? memFiltered[memFiltered.length - 1] : 0;
-    const memHighest = memFiltered.length > 0 ? Math.max(...memFiltered) : 0;
+    const memAppFiltered = memAppData.filter(v => v !== null && v !== undefined && !isNaN(v));
+    const memAppCurrent = memAppFiltered.length > 0 ? memAppFiltered[memAppFiltered.length - 1] : 0;
+    const memAppHighest = memAppFiltered.length > 0 ? Math.max(...memAppFiltered) : 0;
+
+    const memSysFiltered = memSysData.filter(v => v !== null && v !== undefined && !isNaN(v));
+    const memSysCurrent = memSysFiltered.length > 0 ? memSysFiltered[memSysFiltered.length - 1] : 0;
+    const memSysHighest = memSysFiltered.length > 0 ? Math.max(...memSysFiltered) : 0;
     
     // Update CPU stat displays
     const cpuSysCurrentEl = document.getElementById('cpu-sys-current');
@@ -83,10 +89,14 @@ function renderCharts() {
     if (cpuAppHighestEl) cpuAppHighestEl.textContent = cpuAppHighest.toFixed(1) + '%';
     
     // Update Memory stat displays
-    const memCurrentEl = document.getElementById('mem-current');
-    const memPeakEl = document.getElementById('mem-peak');
-    if (memCurrentEl) memCurrentEl.textContent = memCurrent.toFixed(2) + ' GB';
-    if (memPeakEl) memPeakEl.textContent = memHighest.toFixed(2) + ' GB';
+    const memSysCurrentEl = document.getElementById('mem-sys-current');
+    const memSysMaxEl = document.getElementById('mem-sys-max');
+    const memAppCurrentEl = document.getElementById('mem-app-current') || document.getElementById('mem-current');
+    const memAppPeakEl = document.getElementById('mem-app-peak') || document.getElementById('mem-peak');
+    if (memSysCurrentEl) memSysCurrentEl.textContent = memSysCurrent.toFixed(2) + ' GB';
+    if (memSysMaxEl) memSysMaxEl.textContent = memSysHighest.toFixed(2) + ' GB';
+    if (memAppCurrentEl) memAppCurrentEl.textContent = memAppCurrent.toFixed(2) + ' GB';
+    if (memAppPeakEl) memAppPeakEl.textContent = memAppHighest.toFixed(2) + ' GB';
 
     createOrUpdateLineChart('cpuChart', [
         { label: 'System CPU %', data: dataPoints.map(p => ({ x: p.timestampMs, y: p.system ? p.system.cpu_percent : p.cpu_sys })), color: COLORS[0] },
@@ -94,7 +104,8 @@ function renderCharts() {
     ], false);
 
     createOrUpdateLineChart('memChart', [
-        { label: 'App Memory (GB)', data: dataPoints.map(p => ({ x: p.timestampMs, y: p.system ? p.system.app_memory_gb : p.mem_app_gb })), color: COLORS[1] }
+        { label: 'App Memory (GB)', data: dataPoints.map(p => ({ x: p.timestampMs, y: p.system ? (p.system.app_memory_gb || 0) : p.mem_app_gb })), color: COLORS[1] },
+        { label: 'System Memory (GB)', data: dataPoints.map(p => ({ x: p.timestampMs, y: p.system ? (p.system.memory_used_gb || 0) : (p.mem_sys_gb || 0) })), color: COLORS[2] }
     ], false);
 
     const hwDatasets = [];

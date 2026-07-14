@@ -62,7 +62,7 @@ RUN --mount=type=cache,target=/root/.cache \
 ENV POETRY_VIRTUALENVS_CREATE=false
 RUN --mount=type=cache,target=/root/.cache \
   pip install poetry && \
-  poetry install --without dev && \
+  poetry install --without dev --with ml && \
   # Segregated Install: NVIDIA CUDA Support\
   mkdir -p /app/libs/nvidia && \
   python3 -m pip install "onnxruntime-gpu~=1.25.0" --target /app/libs/nvidia --no-dependencies && \

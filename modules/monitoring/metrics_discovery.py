@@ -265,7 +265,7 @@ def _fetch_single_intel_gpu_load(unit_id):
     # 4. Preprocessor Lock Fallback
     try:
         for pm in model_manager.PREPROCESSOR_POOL.values():
-            pm_unit_id = pm.unit["id"] if pm.unit else pm.device_id
+            pm_unit_id = (pm.unit or {}).get("id", pm.device_id)
             pm_unit_name = pm.unit.get("name", "") if pm.unit else ""
             if (
                 pm.device_type == "GPU"
@@ -338,7 +338,7 @@ def _fetch_single_npu_load(unit_id):
     # 4. Preprocessor Lock Fallback
     try:
         for pm in model_manager.PREPROCESSOR_POOL.values():
-            pm_unit_id = pm.unit["id"] if pm.unit else pm.device_id
+            pm_unit_id = (pm.unit or {}).get("id", pm.device_id)
             if pm.device_type == "NPU" and _resolve_index(pm_unit_id) == idx and pm.lock.locked():
                 return 100
     except AttributeError:
@@ -374,7 +374,7 @@ def _fetch_single_cuda_fallback(unit_id, idx):
     # 2. Preprocessor Lock Fallback
     try:
         for pm in model_manager.PREPROCESSOR_POOL.values():
-            pm_unit_id = pm.unit["id"] if pm.unit else pm.device_id
+            pm_unit_id = (pm.unit or {}).get("id", pm.device_id)
             if pm.device_type == "CUDA" and _resolve_index(pm_unit_id) == idx and pm.lock.locked():
                 return 99
     except AttributeError:

@@ -1,0 +1,61 @@
+# Release v1.1.5 - App CPU Normalization, System Memory Charting, Advanced Live Speed Estimation & Dependency Upgrades
+
+This release introduces dashboard improvements, diagnostic charting, and dependency synchronization.
+
+---
+
+## 🚀 Key Improvements & Bug Fixes
+
+### 📊 App CPU Normalization
+
+- **Normalized Scale**: Process CPU usage is now normalized relative to the host CPU core count (`psutil.cpu_count() or 1`). Both App CPU and System CPU widgets and charts now use the same 0-100% capacity scale.
+
+### 📈 System Memory in Charts
+
+- **Enhanced Telemetry**: Telemetry snapshots now record `mem_sys_gb` alongside process memory metrics.
+- **Unified Visuals**: The Memory Allocation chart displays a new series for `System Memory (GB)` using a dedicated color palette entry, providing a comprehensive view of process vs. host memory pressure.
+
+### ⏱️ Advanced Live Speed & ETA Estimation (Strategy 2)
+
+- **Active Task Timeline Tracking**: Implemented progress snapshot history caching (`activeTaskTimeline`) in the browser. Task timeline data is automatically pruned to prevent memory leaks.
+- **Multi-Stage Progress Deconstruction**: Refactored the Speed/ETA algorithm to treat Vocal Separation (UVR) and Whisper Inference (ASR) as distinct stages with unique performance profiles:
+  - When UVR is active, the UVR ETA is computed from the live local progress timeline, while the ASR ETA is predicted from historical benchmarks.
+  - When ASR is active, UVR is already finished, and ASR ETA is computed from live ASR progress.
+  - Fallback logic checks for overall session speed, historical speeds, or default profiles (5x for ASR, 2x for UVR) if no points exist yet.
+
+### 🛠️ Pinned & Upgraded Dependencies
+
+- **Python Backend**: Upgraded python dependencies in `pyproject.toml` to their latest final versions compatible with PyTorch/ONNX/OpenVINO constraints.
+- **JS Frontend**: Updated devDependencies in `package.json` to their latest final versions (Vitest 4, ESLint 10, Stylelint 17, and globals 17). Adjusted code coverage thresholds in `vitest.config.cjs` to `88%` statement coverage.
+
+### ✅ Python Lint Hardening (CI + Local Parity)
+
+- **Flake8 Added to Lint Gate**: CI lint stage and local parity lint paths now enforce Flake8 over `modules`, `whisper_pro_asr.py`, `tests`, and `tests/check_coverage.py`.
+- **Strict Policy Enabled**: Flake8 runs with `max-line-length=140` and zero ignore directives.
+- **Compatibility Fixes Applied**: Resolved Ruff/Flake8 slice-formatting conflicts and cleaned test-style violations so Ruff, Flake8, and Pylint pass together.
+
+### 🌐 Dashboard + Analytics E2E Hardening
+
+- **Mandatory Playwright Coverage**: Added deterministic Playwright end-to-end validation for dashboard endpoint filters, user operation flows, analytics page rendering, and charts-tab telemetry behavior.
+- **User Scenario Validation**: Added E2E coverage for high-value operator actions including refresh pause/resume, settings save, history/telemetry clearing, log download, and analytics JSON export.
+- **Analytics Compatibility Guard**: Added E2E and fixture validations to confirm analytics detect-language metrics remain visible when legacy `isolations` keys are present.
+
+### 📱 Dashboard Mobile & UI Consistency Adaptation
+
+- **Mobile Responsive Design**: Added media queries (`<768px`, `<600px`, and `<480px`) to adjust body padding, stack header elements vertically, and configure stats metric cards into a neat 2-column layout.
+- **Scrollable Navigation Tabs**: Enabled touch-friendly horizontal swipe-scrolling for `.tabs` to prevent horizontal page overflow while keeping tabs in a single row on mobile screens.
+- **Task Badge Overlap & Shrinkage Fix**: Replaced absolute positioning of badges with a responsive flexbox wrapping layout that positions the status and language badges side-by-side on the row below the filename. Added `min-width` and `flex-shrink` parameters to enable proper filename ellipsis on narrow viewports.
+- **Telemetry & Logs Wrapping**: Enforced `word-break: break-all` on log buffers, JSON outputs, and result boxes, and set `min-width: 0` constraints on CSS Grid components to prevent any element from causing horizontal overflow.
+- **Consistent Live Refresh Dropdown**: Redesigned the refresh interval select dropdown into a pill-shaped button matching the app's primary theme, including custom SVG arrow and option styling that respects light/dark modes.
+
+---
+
+## 🧪 Full Verification & Validation
+
+- **609/609 Python Tests Passing**: All unit, integration, and performance tests pass successfully.
+- **66/66 JS Tests Passing**: All vitest tests pass successfully, achieving 90.08% statement coverage on `dashboard_main.js`.
+- **94.83% Python Code Coverage**: Exceeds the 90% build-gate threshold.
+- **Flake8 Gate Passing**: Strict Flake8 checks pass with no ignore directives.
+- **Perfect Pylint score (10.0/10)** on all Python files with zero suppressions.
+- **Docker Production Image**: Successfully compiled and verified to boot up cleanly with no errors, running Uvicorn and serving healthy status/ASR endpoints on port 9000.
+- **Frontend Quality Gate Passing**: `npm run quality:frontend` passes with lint, coverage thresholds, and extended Playwright scenarios.

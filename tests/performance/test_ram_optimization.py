@@ -27,7 +27,7 @@ class TestRAMOptimization:
                         res_path, _, _ = routes.handle_upload(mock_file)
 
                         # Verify that we read from the file stream in chunks
-                        mock_file.file.read.assert_called()
+                        assert mock_file.file.read.call_count >= 2
                         assert res_path.startswith("/tmp/whisper")
                         assert "upload_" in res_path
 

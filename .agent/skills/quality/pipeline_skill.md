@@ -1,0 +1,104 @@
+# Local Pipeline Execution Skill
+
+This skill provides a structured workflow for running the Whisper Pro ASR CI/CD pipeline locally. It automates linting, testing, and coverage verification.
+
+## Prerequisites
+
+- Python 3.12+ (or Docker Desktop for containerized runs)
+- PowerShell 7+ (Windows) or Bash (Linux/macOS)
+
+## Workflow Steps
+
+### 1. Execute Pipeline (Local Python Environment)
+
+Run the test suite directly using pytest:
+
+```bash
+python3 -m pytest tests/
+```
+
+This will run all unit and integration tests, enforce >90% coverage, and output a coverage report.
+
+### 2. Execute Pipeline (Containerized Docker)
+
+Run the main build and test script:
+
+- Both local wrappers verify `poetry.lock` in the workspace before Docker builds, using a disposable Python container to regenerate it only when it is missing or stale.
+
+- **Linux/macOS**:
+
+  ```bash
+  ./scripts/ci/build-and-test.sh
+  ```
+
+- **Windows**:
+
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File .\scripts\ci\build-and-test.ps1
+  ```
+
+### 3. Resolve Test Failures & Coverage
+
+If tests fail:
+
+- Review `pytest.xml` or `coverage_output.txt` for specific test failures.
+- Fix broken assertions or environment-specific mocks.
+- If coverage is below 90%, add missing test cases in the `tests/` directory to ensure all paths are verified before refactoring.
+- Local parity pipeline contract: on successful completion, `assets/coverage.svg` must always be generated and overwritten from the latest coverage run. Missing or empty badge artifacts are treated as pipeline failures.
+- Coverage badge dependencies are auto-bootstrapped during local pipeline execution; the run still fails if automatic install cannot satisfy badge generation requirements.
+
+### 4. Resolve Linting Issues
+
+Once the system is stable and covered by tests:
+
+- **Requirement**: Run `npm run fix:md` when Markdown formatting drift exists, then pass `npm run lint:md`.
+- **Requirement**: Achieve a Pylint score of **10.0/10.0**.
+- **Requirement**: Pass Flake8 checks on `modules`, `whisper_pro_asr.py`, `tests`, and `tests/check_coverage.py`.
+- **Constraint**: Do NOT ignore or disable lints unless absolutely necessary for architectural reasons.
+- Fix import errors, remove unused code, and enforce PEP8 standards across all modules and tests.
+- Fix Markdown lint issues via the repo-configured markdownlint auto-fix flow before resorting to manual cleanup.
+- Note: High coverage ensures that lint-driven refactoring does not introduce regressions.
+
+### 5. Verify New Features
+
+After implementing changes, verify the following areas have test coverage:
+
+- **Speaker Diarization**: `tests/inference/test_diarization.py` — WhisperX orchestration, caching, fallbacks.
+- **ASR Improvements**: `tests/inference/test_improvements.py` — parameter forwarding, idle timeout, subtitle wrapping.
+- **Priority Concurrency**: `tests/inference/priority/test_priority_concurrency.py` — hardware pool configurations, yielding.
+
+## Test Suite Structure
+
+```text
+tests/
+├── inference/
+│   ├── test_diarization.py          # Speaker diarization pipeline tests
+│   ├── test_improvements.py         # ASR params, idle timeout, subtitle wrapping
+│   ├── test_priority_concurrency.py # Multi-unit scheduling & preemption
+│   └── ...
+├── test_api_*.py                    # API route integration tests
+├── test_config.py                   # Configuration resolution tests
+└── ...
+```
+
+## Execution
+
+To run this skill, execute:
+
+**Linux/macOS (Direct pytest):**
+
+```bash
+python3 -m pytest tests/
+```
+
+**Linux/macOS (Containerized Docker):**
+
+```bash
+./scripts/ci/build-and-test.sh
+```
+
+**Windows (Containerized Docker):**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\ci\build-and-test.ps1
+```

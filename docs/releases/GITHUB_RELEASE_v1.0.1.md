@@ -1,21 +1,25 @@
 # 🚀 Whisper Pro ASR v1.0.1 - Stability & Reliability Update
 
-We are proud to announce the **v1.0.1** release of **Whisper Pro ASR**. This update focuses on long-term system stability, resource management, and reliability. 
+We are proud to announce the **v1.0.1** release of **Whisper Pro ASR**. This update focuses on long-term system stability, resource management, and reliability.
 
 This version addresses critical storage and memory leaks identified in the preprocessing pipeline, ensuring the service can run indefinitely in high-load production environments without manual cache maintenance.
 
 ## 🌟 v1.0.1 Highlights
 
 ### 🧹 Industrial-Grade Cache Management
+
 Fixed a critical issue where intermediate stems from the UVR/MDX-NET vocal isolation process were being left in the `model_cache/preprocessing` directory. The system now guarantees absolute cleanup of all temporary files, even when processing fails or is interrupted. Additionally, version 1.0.1 now **automatically purges any legacy orphaned files** left over from version 1.0.0 during the initial startup sequence.
 
 ### 🛡️ Resource Leak Prevention
+
 Implemented comprehensive `finally` block coverage across the entire inference lifecycle. This ensures that:
+
 - **File Descriptors**: All temporary file handles are closed immediately.
 - **Temporary Files**: `segment_in_*.wav` and other transient assets are deleted even if an exception occurs during isolation.
 - **Warmup Artifacts**: Model warmup stems are now properly captured and purged at startup.
 
 ### 📈 Enhanced Test Coverage
+
 The test suite has been expanded to cover over 90% of all code paths, including edge-case error handling for FFmpeg, soundfile, and hardware-specific fallback scenarios.
 
 ---
@@ -25,6 +29,7 @@ The test suite has been expanded to cover over 90% of all code paths, including 
 The recommended way to deploy **Whisper Pro ASR** is via `docker-compose.yml`. This allows you to easily manage hardware mapping and persistent caches.
 
 ### **Quick Install (Default)**
+
 ```bash
 git clone https://github.com/ventura8/Whisper-Pro-ASR.git
 cd Whisper-Pro-ASR
@@ -32,6 +37,7 @@ docker compose up -d
 ```
 
 ### **Full docker-compose.yml Example**
+
 ```yaml
 services:
   whisper-asr:
@@ -61,6 +67,7 @@ services:
 ```
 
 ## 📝 Changelog Summary
+
 - **FIX**: Automatically clean up legacy storage leaks from version 1.0.0 in the preprocessing cache at startup.
 - **FIX**: Resolved an issue where temporary vocal and instrumental stems were not properly cleaned up, causing `model_cache/preprocessing` to grow indefinitely.
 - **FIX**: Warmup inference stems are now properly captured and deleted on startup.

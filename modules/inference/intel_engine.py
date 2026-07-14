@@ -131,10 +131,7 @@ class IntelWhisperEngine:
         if kwargs.get("vad_filter", False):
             if speech_ts:
                 # Mask non-speech with zero to preserve temporal context while removing noise
-                mask = np.zeros_like(audio_data, dtype=bool)
-                for ts_item in speech_ts:
-                    mask[int(ts_item["start"] * 16000) : int(ts_item["end"] * 16000)] = True
-                audio_data[~mask] = 0.0
+                audio_data = self._apply_vad_mask(audio_data, speech_ts)
                 logger.debug("[Intel] VAD suppression applied to %d speech segments.", len(speech_ts))
             else:
                 logger.info("[Intel] VAD found no speech.")
@@ -192,6 +189,21 @@ class IntelWhisperEngine:
 
         return segment_generator(), info
 
+    def _apply_vad_mask(self, audio_data: np.ndarray, speech_ts: List[dict]) -> np.ndarray:
+        """Create a boolean mask from speech timestamps and zero out non-speech.
+
+        Returns a new masked audio array, leaving the original audio_data unchanged.
+        """
+        # Work on a copy to avoid mutating the caller's buffer
+        masked_audio = np.copy(audio_data)
+        mask = np.zeros_like(audio_data, dtype=bool)
+        for ts in speech_ts:
+            start_idx = int(ts["start"] * 16000)
+            end_idx = int(ts["end"] * 16000)
+            mask[start_idx:end_idx] = True
+        masked_audio[~mask] = 0.0
+        return masked_audio
+
     def apply_vad(self, audio_data: np.ndarray, **kwargs: Any) -> np.ndarray:
         """Apply Voice Activity Detection to suppress silence."""
         try:
@@ -207,13 +219,8 @@ class IntelWhisperEngine:
                 logger.info("[Intel] VAD found no speech.")
                 return np.zeros_like(audio_data)
 
-            # Mask non-speech with zero to preserve temporal context while removing noise
-            mask = np.zeros_like(audio_data, dtype=bool)
-            for ts in speech_ts:
-                start_idx = int(ts["start"] * 16000)
-                end_idx = int(ts["end"] * 16000)
-                mask[start_idx:end_idx] = True
-            audio_data[~mask] = 0.0
+            # Use shared helper for mask creation
+            audio_data = self._apply_vad_mask(audio_data, speech_ts)
             logger.debug("[Intel] VAD suppression applied to %d speech segments.", len(speech_ts))
         except (RuntimeError, ValueError) as e:
             logger.warning("[Intel] VAD suppression failed: %s", e)

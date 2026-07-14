@@ -309,7 +309,10 @@ def test_no_unknown_status_leakage_in_normal_operation(clean_scheduler, clean_te
 
 
 def test_concurrent_task_arrivals_deterministic_ordering(clean_scheduler, clean_telemetry):
-    """Verify that when 5 tasks arrive concurrently with same start_time, they maintain consistent ordering across multiple get_service_stats() calls."""
+    """Verify deterministic ordering for 5 concurrent arrivals with identical start_time values.
+
+    Ordering should remain stable across repeated get_service_stats() calls.
+    """
     with scheduler.STATE.task_registry_lock:
         scheduler.STATE.task_registry.clear()
         scheduler.STATE.task_registry["active_1"] = {

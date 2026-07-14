@@ -1,3 +1,4 @@
+/* global describe, it, expect */
 const path = require("path");
 const { evalInContext, loadScriptInContext } = require("./helpers");
 

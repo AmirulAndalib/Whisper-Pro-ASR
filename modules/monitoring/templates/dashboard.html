@@ -31,6 +31,12 @@
                 <span class="material-icons-sharp" style="font-size: 18px" id="refresh-icon">sync</span>
                 <span id="refresh-text">Live Refresh</span>
             </button>
+            <select id="refresh-interval" aria-label="Refresh interval" onchange="changeRefreshInterval(this.value)">
+                <option value="1000">1s</option>
+                <option value="2000" selected>2s</option>
+                <option value="5000">5s</option>
+                <option value="10000">10s</option>
+            </select>
             <div id="app-version" style="font-size: 14px; font-weight: 500; color: var(--md-sys-color-primary)">v--</div>
         </div>
     </header>
@@ -77,10 +83,22 @@
             </div>
 
             <div id="active-section">
+                <div class="filter-row">
+                    <button class="btn-filter active-filter" onclick="filterTasks('all')" id="filter-all">All</button>
+                    <button class="btn-filter" onclick="filterTasks('asr')" id="filter-asr">/asr</button>
+                    <button class="btn-filter" onclick="filterTasks('detectlang')" id="filter-detectlang">/detect-language</button>
+                    <button class="btn-filter" onclick="filterTasks('v1')" id="filter-v1">/v1/audio/...</button>
+                </div>
                 <div class="task-list" id="task-list"></div>
             </div>
 
             <div id="history-section">
+                <div class="filter-row">
+                    <button class="btn-filter active-filter" onclick="filterHistory('all')" id="hist-filter-all">All</button>
+                    <button class="btn-filter" onclick="filterHistory('asr')" id="hist-filter-asr">/asr</button>
+                    <button class="btn-filter" onclick="filterHistory('detectlang')" id="hist-filter-detectlang">/detect-language</button>
+                    <button class="btn-filter" onclick="filterHistory('v1')" id="hist-filter-v1">/v1/audio/...</button>
+                </div>
                 <div class="history-list" id="history-list"></div>
             </div>
 
@@ -124,12 +142,20 @@
                         <div class="section-title"><span class="material-icons-sharp">memory</span> Memory Allocation (GB)</div>
                         <div class="chart-stats-row">
                             <div class="stat-box stat-box-compact">
-                                <div class="stat-label">Memory Current</div>
-                                <div class="stat-value" id="mem-current">0 GB</div>
+                                <div class="stat-label">System Memory Current</div>
+                                <div class="stat-value" id="mem-sys-current">0 GB</div>
                             </div>
                             <div class="stat-box stat-box-compact">
-                                <div class="stat-label">Memory Peak</div>
-                                <div class="stat-value" id="mem-peak">0 GB</div>
+                                <div class="stat-label">System Memory Max</div>
+                                <div class="stat-value" id="mem-sys-max">0 GB</div>
+                            </div>
+                            <div class="stat-box stat-box-compact">
+                                <div class="stat-label">App Memory Current</div>
+                                <div class="stat-value" id="mem-app-current">0 GB</div>
+                            </div>
+                            <div class="stat-box stat-box-compact">
+                                <div class="stat-label">App Memory Peak</div>
+                                <div class="stat-value" id="mem-app-peak">0 GB</div>
                             </div>
                         </div>
                         <div class="chart-container" id="memChart"></div>
@@ -177,6 +203,25 @@
                         </div>
                         <div style="display:flex; justify-content:flex-end;">
                             <button onclick="saveSettings()" class="btn-swagger" style="border:none; cursor:pointer; padding: 10px 40px; font-size:15px;">Save Configuration</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="card" style="margin-top: 24px;">
+                    <div class="section-title"><span class="material-icons-sharp">delete_sweep</span> Database Maintenance</div>
+                    <div style="display:flex; flex-direction:column; gap:16px; padding: 10px;">
+                        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+                            <div>
+                                <strong style="font-size:14px; display:block; margin-bottom:4px;">Purge Task History</strong>
+                                <span style="font-size:12px; color:var(--md-sys-color-secondary);">Clear all completed/failed task logs from the database.</span>
+                            </div>
+                            <button onclick="clearTaskHistory()" class="btn-swagger" style="border:none; cursor:pointer; background:var(--md-sys-color-error-container); color:var(--md-sys-color-error)">Clear History</button>
+                        </div>
+                        <div style="display:flex; justify-content:space-between; align-items:center; border-top: 1px solid var(--border-color); padding-top: 16px; flex-wrap:wrap; gap:12px;">
+                            <div>
+                                <strong style="font-size:14px; display:block; margin-bottom:4px;">Purge Telemetry Metrics</strong>
+                                <span style="font-size:12px; color:var(--md-sys-color-secondary);">Clear all historical system CPU/Memory charting snapshots.</span>
+                            </div>
+                            <button onclick="clearTelemetryMetrics()" class="btn-swagger" style="border:none; cursor:pointer; background:var(--md-sys-color-error-container); color:var(--md-sys-color-error)">Clear Telemetry</button>
                         </div>
                     </div>
                 </div>

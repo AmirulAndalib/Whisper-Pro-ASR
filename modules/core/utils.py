@@ -61,7 +61,7 @@ def get_system_telemetry():
 
     return {
         "cpu_percent": cpu_usage,
-        "app_cpu_percent": round(app_cpu, 1),
+        "app_cpu_percent": round(app_cpu / (psutil.cpu_count() or 1), 1),
         "memory_percent": mem.percent,
         "memory_used_gb": round(mem.used / (1024**3), 2),
         "memory_total_gb": round(mem.total / (1024**3), 2),

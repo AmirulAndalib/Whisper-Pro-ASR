@@ -33,6 +33,11 @@ function formatDDHHMMSS(sec) {
     return `${d}d ${h}h ${m}m`;
 }
 
+function getDetectLangStat(source) {
+    if (!source) return { count: 0, duration: 0.0 };
+    return source.detectlang || source.isolations || { count: 0, duration: 0.0 };
+}
+
 async function fetchAnalytics() {
     try {
         const res = await fetch('/analytics', {
@@ -61,14 +66,14 @@ function renderAnalytics(data) {
 
     // Cumulative Breakdown Cards
     const asrCum = cumulative.asr || { count: 0, duration: 0.0 };
-    const dlCum = cumulative.detectlang || { count: 0, duration: 0.0 };
+    const detectlangCum = getDetectLangStat(cumulative);
     const audCum = cumulative.audio || { count: 0, duration: 0.0 };
 
     document.getElementById('val-asr-cumulative').innerText = formatDuration(asrCum.duration);
     document.getElementById('val-asr-count').innerText = `${asrCum.count} tasks`;
 
-    document.getElementById('val-detectlang-cumulative').innerText = formatDuration(dlCum.duration);
-    document.getElementById('val-detectlang-count').innerText = `${dlCum.count} tasks`;
+    document.getElementById('val-detectlang-cumulative').innerText = formatDuration(detectlangCum.duration);
+    document.getElementById('val-detectlang-count').innerText = `${detectlangCum.count} tasks`;
 
     document.getElementById('val-audio-cumulative').innerText = formatDuration(audCum.duration);
     document.getElementById('val-audio-count').innerText = `${audCum.count} tasks`;
@@ -84,15 +89,15 @@ function renderAnalytics(data) {
         tbody.innerHTML = [...sortedDates].reverse().map(date => {
             const info = daily[date] || {};
             const asr = info.asr || { count: 0, duration: 0.0 };
-            const dl = info.detectlang || { count: 0, duration: 0.0 };
+            const detectlang = getDetectLangStat(info);
             const aud = info.audio || { count: 0, duration: 0.0 };
             const safeDate = escapeHtml(date);
             const safeCount = escapeHtml(info.count || 0);
             const safeAsrCount = escapeHtml(asr.count || 0);
-            const safeDlCount = escapeHtml(dl.count || 0);
+            const safeDetectlangCount = escapeHtml(detectlang.count || 0);
             const safeAudCount = escapeHtml(aud.count || 0);
             const safeAsrDur = escapeHtml(formatDuration(asr.duration));
-            const safeDlDur = escapeHtml(formatDuration(dl.duration));
+            const safeDetectlangDur = escapeHtml(formatDuration(detectlang.duration));
             const safeAudDur = escapeHtml(formatDuration(aud.duration));
             const safeTotalDur = escapeHtml(formatDuration(info.duration));
             return `
@@ -100,7 +105,7 @@ function renderAnalytics(data) {
                     <td style="font-family: 'Roboto Mono', monospace; font-weight: 500;">${safeDate}</td>
                     <td><strong>${safeCount}</strong></td>
                     <td>${safeAsrCount} <span style="font-size:11px; color:var(--md-sys-color-outline)">(${safeAsrDur})</span></td>
-                    <td>${safeDlCount} <span style="font-size:11px; color:var(--md-sys-color-outline)">(${safeDlDur})</span></td>
+                    <td>${safeDetectlangCount} <span style="font-size:11px; color:var(--md-sys-color-outline)">(${safeDetectlangDur})</span></td>
                     <td>${safeAudCount} <span style="font-size:11px; color:var(--md-sys-color-outline)">(${safeAudDur})</span></td>
                     <td><strong>${safeTotalDur}</strong></td>
                 </tr>
@@ -118,11 +123,11 @@ function renderCharts(dates, daily) {
     const isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
     
     const asrCounts = dates.map(d => (daily[d].asr || {}).count || 0);
-    const detectlangCounts = dates.map(d => (daily[d].detectlang || {}).count || 0);
+    const detectlangCounts = dates.map(d => getDetectLangStat(daily[d]).count || 0);
     const audioCounts = dates.map(d => (daily[d].audio || {}).count || 0);
 
     const asrDurationsMin = dates.map(d => parseFloat((((daily[d].asr || {}).duration || 0) / 60).toFixed(2)));
-    const detectlangDurationsMin = dates.map(d => parseFloat((((daily[d].detectlang || {}).duration || 0) / 60).toFixed(2)));
+    const detectlangDurationsMin = dates.map(d => parseFloat(((getDetectLangStat(daily[d]).duration || 0) / 60).toFixed(2)));
     const audioDurationsMin = dates.map(d => parseFloat((((daily[d].audio || {}).duration || 0) / 60).toFixed(2)));
 
     // 1. Tasks Chart (Stacked Bar Chart)

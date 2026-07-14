@@ -39,9 +39,7 @@ def reset_state():
         scheduler.STATE.engine_initialized = True
 
     # Reset thread context
-    utils.THREAD_CONTEXT.is_priority = False
-    if hasattr(utils.THREAD_CONTEXT, "assigned_unit"):
-        utils.THREAD_CONTEXT.assigned_unit = None
+    utils.THREAD_CONTEXT.reset()
     yield
 
 
@@ -155,8 +153,8 @@ def test_diarization_failure_fallback():
 def test_routes_extract_diarize_params():
     """Verify that ASR endpoints parse and forward diarization params."""
     mock_req = mock.MagicMock()
-    mock_req.headers = {}
-    mock_req.query_params = {"diarize": "true", "min_speakers": "2", "max_speakers": "4", "hf_token": "test_tok"}
+    mock_req.headers = {"X-HF-Token": "test_tok"}
+    mock_req.query_params = {"diarize": "true", "min_speakers": "2", "max_speakers": "4"}
     mock_req.url.path = "/asr"
     params = asyncio.run(get_request_params(mock_req, {}))
     assert params["diarize"] is True

@@ -3,20 +3,40 @@
 import xml.etree.ElementTree as ET
 from unittest import mock
 
-import check_coverage
+import pytest
+
+from tests import check_coverage
 
 
-def test_run_report_success():
-    """Test run_report with a valid coverage.xml."""
-    xml_content = """<coverage line-rate="0.95">
-        <packages>
-            <package name="modules">
-                <classes>
-                    <class filename="modules/mod1.py" line-rate="0.9" name="mod1.py"></class>
-                </classes>
-            </package>
-        </packages>
-    </coverage>"""
+def test_check_coverage_success(capsys):
+    """Check utility prints PASS and success summary when all files meet threshold."""
+    xml_content = """<coverage line-rate="0.95"><packages>
+        <package name="modules"><classes>
+            <class filename="modules/mod1.py" line-rate="0.95" name="mod1.py"></class>
+        </classes></package>
+    </packages></coverage>"""
+    root = ET.fromstring(xml_content)
+
+    with mock.patch("xml.etree.ElementTree.parse") as mock_parse:
+        mock_tree = mock.MagicMock()
+        mock_tree.getroot.return_value = root
+        mock_parse.return_value = mock_tree
+        check_coverage.check_coverage("coverage.xml", threshold=0.9, use_color=False)
+        mock_parse.assert_called_once_with("coverage.xml")
+
+    out = capsys.readouterr().out
+    assert "modules/mod1.py" in out
+    assert "PASS" in out
+    assert "SUCCESS" in out
+
+
+def test_check_coverage_failure_exits(capsys):
+    """Check utility exits with code 1 and failure summary when a file is below threshold."""
+    xml_content = """<coverage line-rate="0.50"><packages>
+        <package name="modules"><classes>
+            <class filename="modules/mod1.py" line-rate="0.50" name="mod1.py"></class>
+        </classes></package>
+    </packages></coverage>"""
     root = ET.fromstring(xml_content)
 
     with mock.patch("xml.etree.ElementTree.parse") as mock_parse:
@@ -24,16 +44,11 @@ def test_run_report_success():
         mock_tree.getroot.return_value = root
         mock_parse.return_value = mock_tree
 
-        with mock.patch("check_coverage.logger") as mock_logger:
-            check_coverage.run_report()
-            # Just check that it was called with the right data
-            mock_logger.info.assert_any_call(mock.ANY, mock.ANY, "modules/mod1.py", 90.0)
-            mock_logger.info.assert_any_call(mock.ANY, 95.0)
+        with pytest.raises(SystemExit) as exc:
+            check_coverage.check_coverage("coverage.xml", threshold=0.9, use_color=False)
+        mock_parse.assert_called_once_with("coverage.xml")
 
-
-def test_run_report_exception():
-    """Test run_report handles exceptions."""
-    with mock.patch("xml.etree.ElementTree.parse", side_effect=Exception("parse error")):
-        with mock.patch("check_coverage.logger") as mock_logger:
-            check_coverage.run_report()
-            mock_logger.error.assert_called()
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "FAIL" in out
+    assert "CRITICAL" in out

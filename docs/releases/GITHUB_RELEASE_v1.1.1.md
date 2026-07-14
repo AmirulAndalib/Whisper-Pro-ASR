@@ -5,6 +5,7 @@ This patch release improves code quality, stability, and dashboard presentation,
 ## 🚀 Key Improvements & Bug Fixes
 
 ### 🧹 Hardened Static Analysis & Clean Imports
+
 - **Zero Cyclic Imports**: Resolved all static and dynamic circular dependencies between `model_manager`, `concurrency`, and `language_detection_core` by dynamically fetching the `model_manager` module from `sys.modules` at runtime.
 - **Complexity Mitigation**:
   - Refactored `run_diarization` in `modules/inference/diarization.py` to use keyword-only arguments to comply with positional argument limits.
@@ -13,10 +14,12 @@ This patch release improves code quality, stability, and dashboard presentation,
 - **YAML Linting**: Added virtual environment exclusions (`.venv`, `venv`, `node_modules`) to `.yamllint` configuration for recursive project-level scans.
 
 ### 📊 Analytics Duration Standardizing
+
 - **`dd:hh:mm:ss` Format**: Standardized both the "This Month" and "All Time" cumulative duration metrics displayed in the Analytics Report (`analytics.html`) and Monitoring Dashboard (`dashboard.html`) to use a unified zero-padded `dd:hh:mm:ss` format.
 - Implemented a unified `formatDDHHMMSS` frontend formatter to guarantee display parity across monitoring screens.
 
 ### 🧪 Full Verification & Validation
+
 - **100% Pass Rate**: Passed all 345 unit and integration tests successfully.
 - **Coverage**: Maintained a strong **95.24%** project test coverage, comfortably exceeding the 90% build-gate threshold.
 

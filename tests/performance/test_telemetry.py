@@ -22,7 +22,13 @@ def test_get_telemetry_history_empty(mock_telemetry_file):
 
 def test_record_snapshot(mock_telemetry_file):
     stats = {
-        "system": {"cpu_percent": 10.0, "app_cpu_percent": 5.0, "memory_percent": 50.0, "app_memory_gb": 1.0},
+        "system": {
+            "cpu_percent": 10.0,
+            "app_cpu_percent": 5.0,
+            "memory_percent": 50.0,
+            "memory_used_gb": 8.0,
+            "app_memory_gb": 1.0,
+        },
         "telemetry": {"nvidia": [{"util": 20}], "intel_gpu_load": 10, "npu_load": 5},
     }
     telemetry_manager.record_snapshot(stats)
@@ -30,6 +36,7 @@ def test_record_snapshot(mock_telemetry_file):
     history = telemetry_manager.get_telemetry_history()
     assert len(history) == 1
     assert history[0]["cpu_sys"] == 10.0
+    assert history[0]["mem_sys_gb"] == 8.0
     assert history[0]["nvidia_util"] == [20]
 
 
@@ -41,7 +48,13 @@ def test_record_snapshot_pruning(mock_telemetry_file):
         json.dump(history, f)
 
     stats = {
-        "system": {"cpu_percent": 10.0, "app_cpu_percent": 5.0, "memory_percent": 50.0, "app_memory_gb": 1.0},
+        "system": {
+            "cpu_percent": 10.0,
+            "app_cpu_percent": 5.0,
+            "memory_percent": 50.0,
+            "memory_used_gb": 8.0,
+            "app_memory_gb": 1.0,
+        },
         "telemetry": {},
     }
     # With default 24h retention, the old snapshot should be pruned
@@ -50,6 +63,7 @@ def test_record_snapshot_pruning(mock_telemetry_file):
     new_history = telemetry_manager.get_telemetry_history()
     assert len(new_history) == 1
     assert new_history[0]["cpu_sys"] == 10.0
+    assert new_history[0]["mem_sys_gb"] == 8.0
 
 
 def test_record_snapshot_limit(mock_telemetry_file):
@@ -58,7 +72,13 @@ def test_record_snapshot_limit(mock_telemetry_file):
         json.dump(history, f)
 
     stats = {
-        "system": {"cpu_percent": 99.0, "app_cpu_percent": 5.0, "memory_percent": 50.0, "app_memory_gb": 1.0},
+        "system": {
+            "cpu_percent": 99.0,
+            "app_cpu_percent": 5.0,
+            "memory_percent": 50.0,
+            "memory_used_gb": 8.0,
+            "app_memory_gb": 1.0,
+        },
         "telemetry": {},
     }
     telemetry_manager.record_snapshot(stats)
@@ -78,3 +98,93 @@ def test_get_telemetry_history_corrupt(mock_telemetry_file):
     with open(mock_telemetry_file, "w") as f:
         f.write("corrupt json")
     assert telemetry_manager.get_telemetry_history() == []
+
+
+def test_clear_telemetry_history(mock_telemetry_file):
+    stats = {
+        "system": {
+            "cpu_percent": 10.0,
+            "app_cpu_percent": 5.0,
+            "memory_percent": 50.0,
+            "memory_used_gb": 8.0,
+            "app_memory_gb": 1.0,
+        },
+        "telemetry": {},
+    }
+    telemetry_manager.record_snapshot(stats)
+    assert os.path.exists(mock_telemetry_file)
+    assert len(telemetry_manager.get_telemetry_history()) == 1
+
+    telemetry_manager.clear_telemetry_history()
+    assert not os.path.exists(mock_telemetry_file)
+    assert telemetry_manager.get_telemetry_history() == []
+
+
+def test_clear_telemetry_history_oserror(mock_telemetry_file):
+    with mock.patch("os.path.exists", return_value=True):
+        with mock.patch("os.remove", side_effect=OSError("Permission denied")):
+            with pytest.raises(OSError):
+                telemetry_manager.clear_telemetry_history()
+
+
+def test_record_snapshot_exception(mock_telemetry_file):
+    """record_snapshot should raise when stats is missing required keys and leave no partial file."""
+    stats = {}
+    with pytest.raises((KeyError, TypeError)):
+        telemetry_manager.record_snapshot(stats)
+    # No partial/corrupt telemetry file should remain after the failure
+    assert not mock_telemetry_file.exists() or telemetry_manager.get_telemetry_history() == []
+
+
+def test_record_snapshot_atomic_write_cleanup_on_replace_error(mock_telemetry_file, tmp_path):
+    """record_snapshot should remove temporary file and re-raise when atomic replace fails."""
+    stats = {
+        "system": {
+            "cpu_percent": 10.0,
+            "app_cpu_percent": 5.0,
+            "memory_percent": 50.0,
+            "memory_used_gb": 8.0,
+            "app_memory_gb": 1.0,
+        },
+        "telemetry": {},
+    }
+
+    with mock.patch("modules.monitoring.telemetry_manager.os.replace", side_effect=OSError("replace failed")):
+        with pytest.raises(OSError):
+            telemetry_manager.record_snapshot(stats)
+
+    # Temporary files created for atomic writes must be cleaned on failure.
+    leftovers = [path for path in tmp_path.glob("telemetry_*.json") if path.name != "telemetry_history.json"]
+    assert leftovers == []
+
+
+@pytest.mark.parametrize("dump_error", [TypeError("bad dump"), ValueError("bad dump")])
+def test_record_snapshot_atomic_write_cleanup_on_dump_error(mock_telemetry_file, tmp_path, dump_error):
+    """record_snapshot should preserve existing file and clean temp file when json.dump fails."""
+    original_history = [{"timestamp": int(time.time()), "cpu_sys": 7.0}]
+    with open(mock_telemetry_file, "w", encoding="utf-8") as file_obj:
+        json.dump(original_history, file_obj)
+    original_contents = mock_telemetry_file.read_text(encoding="utf-8")
+
+    stats = {
+        "system": {
+            "cpu_percent": 10.0,
+            "app_cpu_percent": 5.0,
+            "memory_percent": 50.0,
+            "memory_used_gb": 8.0,
+            "app_memory_gb": 1.0,
+        },
+        "telemetry": {},
+    }
+
+    with mock.patch("modules.monitoring.telemetry_manager.json.dump", side_effect=dump_error):
+        with pytest.raises(type(dump_error)):
+            telemetry_manager.record_snapshot(stats)
+
+    # Existing telemetry file should remain unchanged when dump fails.
+    assert mock_telemetry_file.read_text(encoding="utf-8") == original_contents
+    assert telemetry_manager.get_telemetry_history() == original_history
+
+    # Temporary files created for atomic writes must be cleaned on failure.
+    leftovers = [path for path in tmp_path.glob("telemetry_*.json") if path.name != "telemetry_history.json"]
+    assert leftovers == []

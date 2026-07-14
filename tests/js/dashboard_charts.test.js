@@ -13,6 +13,14 @@ describe("dashboard_charts.js", () => {
       <div id="memChart"></div>
       <div id="hw-stats"></div>
       <div id="hwChart"></div>
+      <div id="cpu-sys-current"></div>
+      <div id="cpu-sys-highest"></div>
+      <div id="cpu-app-current"></div>
+      <div id="cpu-app-highest"></div>
+      <div id="mem-sys-current"></div>
+      <div id="mem-sys-max"></div>
+      <div id="mem-app-current"></div>
+      <div id="mem-app-peak"></div>
     </body></html>`);
 
     chartInstances = {};
@@ -69,6 +77,9 @@ describe("dashboard_charts.js", () => {
     expect(chartInstances.memChart).toBeTruthy();
     expect(chartInstances.hwChart).toBeTruthy();
     expect(dom.window.document.querySelector('#hw-stats .stat-box')).toBeTruthy();
+
+    expect(dom.window.document.getElementById('mem-app-current').textContent).toBe("1.20 GB");
+    expect(dom.window.document.getElementById('mem-app-peak').textContent).toBe("1.20 GB");
 
     context.changeChartWindow("2");
     context.renderCharts();
