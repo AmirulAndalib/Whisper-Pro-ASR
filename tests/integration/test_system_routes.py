@@ -62,7 +62,7 @@ def test_settings_update(client):
     # We need to mock config and model reloading
     with (
         mock.patch("modules.core.config.update_env") as mock_update,
-        mock.patch("modules.inference.model_manager.load_model") as mock_load,
+        mock.patch("modules.inference.runtime.model_manager.load_model") as mock_load,
     ):
         payload = {"ASR_MODEL": "small"}
         response = client.post("/system/settings", data=json.dumps(payload), content_type="application/json")
@@ -174,7 +174,7 @@ def test_system_routes_update_settings_all_fields(client):
     payload = {"ASR_DEVICE": "cuda", "telemetry_retention_hours": 12, "log_retention_days": 7}
     with (
         mock.patch("modules.core.config.update_env") as mock_upd,
-        mock.patch("modules.inference.model_manager.load_model"),
+        mock.patch("modules.inference.runtime.model_manager.load_model"),
     ):
         response = client.post("/system/settings", data=json.dumps(payload), content_type="application/json")
         assert response.status_code == 200
@@ -182,7 +182,7 @@ def test_system_routes_update_settings_all_fields(client):
 
 
 def test_analytics_json(client):
-    """Test /analytics endpoint JSON response."""
+    """Test the /analytics endpoint JSON response."""
     mock_analytics_data = {
         "cumulative": {
             "all_time": 100.0,
@@ -201,7 +201,21 @@ def test_analytics_json(client):
         assert data["cumulative"]["count_all_time"] == 5
         assert "2026-05-26" in data["daily"]
 
-        # Also test with /system/analytics
+
+def test_system_analytics_json(client):
+    """Test the /system/analytics endpoint JSON response."""
+    mock_analytics_data = {
+        "cumulative": {
+            "all_time": 100.0,
+            "today": 10.0,
+            "this_month": 50.0,
+            "this_year": 100.0,
+            "count_all_time": 5,
+            "count_today": 1,
+        },
+        "daily": {"2026-05-26": {"count": 1, "duration": 10.0}},
+    }
+    with mock.patch("modules.monitoring.history_manager.get_analytics_data", return_value=mock_analytics_data):
         response_sys = client.get("/system/analytics", headers={"Accept": "application/json"})
         assert response_sys.status_code == 200
         data_sys = json.loads(response_sys.data)

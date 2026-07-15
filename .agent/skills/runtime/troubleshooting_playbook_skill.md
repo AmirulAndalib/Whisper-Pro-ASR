@@ -18,7 +18,7 @@ Reproduce quickly, isolate root cause, and convert the fix into deterministic re
 ## Recommended Commands
 
 ```bash
-.venv/bin/python -m pytest -o addopts='' tests/inference/priority/test_priority_concurrency.py -q
+.venv/bin/python -m pytest -o addopts='' tests/inference/scheduler/priority/test_priority_concurrency.py -q
 .venv/bin/python -m pytest tests/
 ```
 
@@ -26,3 +26,4 @@ Reproduce quickly, isolate root cause, and convert the fix into deterministic re
 
 - Repro test fails before fix and passes after fix.
 - Full suite remains green.
+

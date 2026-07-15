@@ -1,18 +1,20 @@
 {
   "name": "whisper-pro-asr-frontend-quality",
-  "version": "1.1.5",
+  "version": "1.1.6",
   "private": true,
   "type": "commonjs",
   "scripts": {
     "fix:md": "markdownlint-cli2 --fix",
     "lint:md": "markdownlint-cli2",
-    "lint:html": "htmlhint \"modules/monitoring/templates/*.html\"",
-    "lint:js": "eslint modules/monitoring/templates/*.js tests/js/**/*.js",
-    "lint:css": "stylelint \"static/**/*.css\" \"modules/monitoring/templates/**/*.css\"",
+    "lint:html": "htmlhint \"modules/monitoring/templates/*.html\" && html-validate --max-warnings 0 \"modules/monitoring/templates/*.html\"",
+    "lint:js": "eslint --max-warnings 0 --no-inline-config --report-unused-disable-directives modules/monitoring/templates/**/*.js tests/js/**/*.js",
+    "lint:js:complexity": "eslint --max-warnings 0 --no-inline-config --report-unused-disable-directives modules/monitoring/templates/dashboard/**/*.js modules/monitoring/templates/analytics/**/*.js",
+    "lint:css": "stylelint --max-warnings 0 --report-needless-disables --report-invalid-scope-disables --report-descriptionless-disables \"static/**/*.css\" \"modules/monitoring/templates/**/*.css\"",
+    "lint:toml": "taplo fmt --check && taplo lint",
     "test:js": "vitest run --coverage",
     "test:e2e": "playwright test",
     "test:e2e:filters": "playwright test tests/e2e/dashboard-filters.spec.cjs",
-    "quality:frontend": "npm run lint:html && npm run lint:js && npm run lint:css && npm run test:js && npm run test:e2e"
+    "quality:frontend": "npm run lint:html && npm run lint:js && npm run lint:js:complexity && npm run lint:css && npm run lint:toml && npm run test:js && npm run test:e2e"
   },
   "devDependencies": {
     "@playwright/mcp": "^0.0.78",
@@ -21,9 +23,10 @@
     "esbuild": "0.28.1",
     "eslint": "10.7.0",
     "globals": "17.7.0",
+    "html-validate": "11.5.6",
     "htmlhint": "1.9.2",
     "jsdom": "29.1.1",
-    "markdownlint-cli2": "^0.23.0",
+    "markdownlint-cli2": "^0.23.1",
     "stylelint": "17.14.0",
     "stylelint-config-standard": "40.0.0",
     "vitest": "4.1.10"

@@ -37,7 +37,7 @@
 ## Key Features
 
 - **Industrial Hardware Acceleration**: Native support for **Intel NPU**, **Intel iGPU**, and **NVIDIA CUDA**.
-- **Speaker Diarization**: Identify who said what using WhisperX alignment and PyAnnote speaker segmentation. Requires `HF_TOKEN` for PyAnnote model access.
+- **Speaker Diarization**: Identify who said what using WhisperX alignment and PyAnnote speaker segmentation. Requires `DIARIZATION_HF_TOKEN` for PyAnnote model access.
 - **Hardware Compatibility Matrix**:
 
     | Engine | CPU | NVIDIA (CUDA) | Intel GPU | Intel NPU |
@@ -117,13 +117,15 @@ The service implements a **Full-Pipeline Priority Yielding** system with unit-sc
 
 ## CI/CD and Verification
 
-The project features an optimized CI/CD pipeline that consolidates linting and testing for maximum efficiency. Pylint, Ruff, Flake8, and Markdownlint are enforced everywhere they apply to guarantee a zero-regression quality standard across code and documentation. Flake8 is enforced with `max-line-length=140`, no violations are ignored, and repository Markdown is checked with `markdownlint-cli2` using the repo configuration and auto-fix flow.
+The project features an optimized CI/CD pipeline that consolidates linting and testing for maximum efficiency. Pylint, Ruff, Flake8, and Markdownlint are enforced everywhere they apply to guarantee a zero-regression quality standard across code and documentation. Ruff and Flake8 are enforced with `max-line-length=140`, no violations are ignored, and repository Markdown is checked with `markdownlint-cli2` using the repo configuration and auto-fix flow.
 
 ### Local Verification
 
 You can run the full test and lint suite locally using Docker to mirror the CI environment:
 
-Local parity scripts (`scripts/ci/build-and-test.sh` and `scripts/ci/build-and-test.ps1`) automatically bootstrap missing host/frontend dependencies for Playwright CLI and MCP tooling by installing npm dependencies when needed, installing Playwright Chromium (`npx playwright install chromium`), and validating MCP CLI availability (`npx @playwright/mcp --help`). These checks require Node.js 20+.
+Local parity scripts (`scripts/ci/build-and-test.sh` and `scripts/ci/build-and-test.ps1`) only build and run the Docker test image and consume its artifacts/results. They do not execute quality gates directly on the host.
+The wrappers record the Docker test image run exit code, then always run the coverage-badge stage before exiting with that recorded code. If `coverage.xml` is missing or empty, the badge stage fails the pipeline; otherwise `assets/coverage.svg` is regenerated from `coverage.xml` even when tests failed.
+The Docker test image runs Radon before pytest using filesystem discovery (`find ... -name '*.py'`) instead of `git ls-files`, because `.git` metadata is not available inside the test image.
 
 ```bash
 # Verify poetry.lock first when dependency metadata changed.
@@ -137,9 +139,17 @@ docker build -t whisper-npu-test -f Dockerfile.test .
 # Auto-fix Markdown before validation when docs changed
 npm run fix:md
 
-# Run the suite (Markdownlint + Yamllint + Ruff check & format + Flake8 + Pylint everywhere + Pytest + Coverage)
+# Run the suite (Markdownlint + Yamllint + Ruff check & format + Flake8 + Pylint everywhere + Radon complexity gate + Pytest + Coverage)
 docker run --rm whisper-npu-test
 ```
+
+## Release Notes v1.1.6
+
+- **FEAT**: Modularized dashboard and analytics frontend assets into manifest-driven feature bundles with deterministic load order.
+- **FEAT**: Refactored scheduler, runtime, preprocessing, and engine orchestration into clearer module ownership with expanded regression coverage.
+- **CI/CD**: Consolidated linting, formatting, audits, and tests into the Docker test image, including in-image `PSScriptAnalyzer`, ShellCheck-safe test runners, and dedicated CI cache scoping for the test environment.
+- **DOCS**: Synced release, setup, architecture, and agent-governance documentation with the `v1.1.6` runtime and quality-gate behavior.
+- **TEST**: Validated the Docker-only parity wrapper end-to-end via `powershell -ExecutionPolicy Bypass -File .\\scripts\\ci\\build-and-test.ps1`.
 
 ## Release Notes v1.1.5
 
@@ -177,7 +187,7 @@ docker run --rm whisper-npu-test
 - **FIX**: Resolved dashboard hardware utilization chart showing `0%` on initial page load (only displaying correct values after F5 refresh).
 - **FIX**: Dashboard chart no longer incorrectly reports GPU/NPU utilization for Whisper ASR when it runs on CPU.
 - **FIX**: Extended metrics discovery to correctly account for `/detect-language` tasks alongside `/asr` tasks in utilization calculations.
-- **FIX**: Removed all `# pylint: disable` suppressions from production code. All lint compliance achieved through genuine code improvements (specific exception types, reduced locals, clean module access).
+- **FIX**: Removed all pylint disable suppressions from production code. All lint compliance achieved through genuine code improvements (specific exception types, reduced locals, clean module access).
 - **STAB**: Added `_POOL_LOCK` to serialize model loading and unloading, preventing race conditions during concurrent engine state transitions.
 - **TEST**: Verified all unit and integration tests passing with a clean **10.00/10** pylint score on all files.
 

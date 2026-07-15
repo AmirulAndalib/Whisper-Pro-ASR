@@ -9,13 +9,15 @@ Ensure stable containerized operation across CPU, Intel, and NVIDIA hosts.
 ## Runtime Checklist
 
 1. Confirm expected device mappings:
-   - Intel: `/dev/dri`, `/dev/accel/accel0` (and `/dev/dxg` for WSL)
+   - Intel Linux: `/dev/dri` and `/dev/accel`; when render/accel node ACLs require `group_add`, derive the host render/accel device GID (for example via `stat -c '%g' /dev/dri/renderD* /dev/accel/*`) and configure that value. `991` is environment-specific and only an example.
+   - Intel Windows/WSL2: `/dev/dxg` plus `/dev/dri` and `/dev/accel` when WSL exposes them
    - NVIDIA: container toolkit + GPU reservation
 2. Confirm persistent volumes:
    - `model_cache` for model and compilation caches
    - `state`/`data` for history, telemetry, logs
 3. Confirm temp-path configuration and fallback thresholds.
 4. Confirm environment flags align with desired engine/device behavior.
+5. Confirm compose build cache configuration remains enabled (`build.cache_from/cache_to` using `.buildx-cache`) and `.dockerignore` excludes volatile artifacts.
 
 ## Validation Commands
 

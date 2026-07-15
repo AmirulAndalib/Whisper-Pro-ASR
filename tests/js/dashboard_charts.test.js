@@ -2,7 +2,7 @@ const path = require("path");
 const { JSDOM } = require("jsdom");
 const { evalInContext, loadScriptInContext, createMatchMediaStub } = require("./helpers");
 
-describe("dashboard_charts.js", () => {
+describe("charts.js", () => {
   let dom;
   let chartInstances;
   let context;
@@ -12,6 +12,7 @@ describe("dashboard_charts.js", () => {
       <div id="cpuChart"></div>
       <div id="memChart"></div>
       <div id="hw-stats"></div>
+      <div id="hw-legend"></div>
       <div id="hwChart"></div>
       <div id="cpu-sys-current"></div>
       <div id="cpu-sys-highest"></div>
@@ -42,7 +43,7 @@ describe("dashboard_charts.js", () => {
     }
 
     context = loadScriptInContext(
-      path.join(__dirname, "../../modules/monitoring/templates/dashboard_charts.js"),
+      path.join(__dirname, "../../modules/monitoring/templates/dashboard/features/charts.js"),
       {
         window: {
           matchMedia: createMatchMediaStub(false),
@@ -77,6 +78,7 @@ describe("dashboard_charts.js", () => {
     expect(chartInstances.memChart).toBeTruthy();
     expect(chartInstances.hwChart).toBeTruthy();
     expect(dom.window.document.querySelector('#hw-stats .stat-box')).toBeTruthy();
+    expect(dom.window.document.querySelector('#hw-legend .hw-legend-item')).toBeTruthy();
 
     expect(dom.window.document.getElementById('mem-app-current').textContent).toBe("1.20 GB");
     expect(dom.window.document.getElementById('mem-app-peak').textContent).toBe("1.20 GB");
@@ -226,6 +228,73 @@ describe("dashboard_charts.js", () => {
     expect(chartInstances.hwChart).toBeTruthy();
   });
 
+  it("supports multi-unit legacy values for Intel GPU and NPU using arrays/objects", () => {
+    const now = Date.now() / 1000;
+    evalInContext(context, "chartWindowMinutes = 1");
+    evalInContext(
+      context,
+      `lastStatusData = {
+        hardware_units: [
+          { id: 'GPU.0', type: 'GPU', name: 'Intel GPU 0' },
+          { id: 'GPU.1', type: 'GPU', name: 'Intel GPU 1' },
+          { id: 'NPU.0', type: 'NPU', name: 'Intel NPU 0' },
+          { id: 'NPU.1', type: 'NPU', name: 'Intel NPU 1' }
+        ]
+      }`
+    );
+    evalInContext(
+      context,
+      `rollingTelemetryBuffer = [{
+        timestamp: ${now},
+        system: null,
+        telemetry: {
+          hardware_util: {},
+          intel_gpu_load: { 'GPU.0': 31, '1': 62 },
+          npu_load: [44, 77]
+        },
+        intel_util: [31, 62],
+        npu_util: [44, 77]
+      }]`
+    );
+
+    context.renderCharts();
+    const series = chartInstances.hwChart.options.series;
+    const values = Object.fromEntries(series.map((s) => [s.name, s.data[0].y]));
+    expect(values["GPU GPU.0 - Intel GPU 0"]).toBe(31);
+    expect(values["GPU GPU.1 - Intel GPU 1"]).toBe(62);
+    expect(values["NPU NPU.0 - Intel NPU 0"]).toBe(44);
+    expect(values["NPU NPU.1 - Intel NPU 1"]).toBe(77);
+  });
+
+  it("parses CUDA unit index for both colon and dot unit id formats", () => {
+    const now = Date.now() / 1000;
+    evalInContext(context, "chartWindowMinutes = 1");
+    evalInContext(
+      context,
+      `lastStatusData = {
+        hardware_units: [
+          { id: 'CUDA:1', type: 'CUDA', name: 'NVIDIA Colon 1' },
+          { id: 'CUDA.1', type: 'CUDA', name: 'NVIDIA Dot 1' }
+        ]
+      }`
+    );
+    evalInContext(
+      context,
+      `rollingTelemetryBuffer = [{
+        timestamp: ${now},
+        telemetry: { hardware_util: {}, nvidia: [{ util: 12 }, { util: 78 }] },
+        nvidia_util: [{ util: 12 }, { util: 78 }],
+        system: { cpu_percent: 12, app_cpu_percent: 5, app_memory_gb: 1.0 }
+      }]`
+    );
+
+    context.renderCharts();
+    const series = chartInstances.hwChart.options.series;
+    const values = Object.fromEntries(series.map((s) => [s.name, s.data[0].y]));
+    expect(values["CUDA CUDA:1 - NVIDIA Colon 1"]).toBe(78);
+    expect(values["CUDA CUDA.1 - NVIDIA Dot 1"]).toBe(78);
+  });
+
   it("covers empty hwDatasets and No Acceleration fallback", () => {
     evalInContext(context, "chartWindowMinutes = 1");
     evalInContext(
@@ -249,6 +318,20 @@ describe("dashboard_charts.js", () => {
     context.window.matchMedia = createMatchMediaStub(true);
     context.renderCharts();
     expect(chartInstances.cpuChart.options.theme.mode).toBe("dark");
+  });
+
+  it("covers legacy NVIDIA fallbacks and default chart color", () => {
+    const point = { telemetry: null, nvidia_util: [42] };
+    expect(context._legacyNvidiaArray(point)).toEqual([42]);
+    expect(context._hasLegacyNvidiaSample(null, 0)).toBe(false);
+    expect(context._legacyNvidiaMetricValue(33)).toBe(33);
+
+    context.createOrUpdateLineChart(
+      "hwChart",
+      [{ label: "No Color", data: [{ x: Date.now(), y: 5 }] }],
+      true
+    );
+    expect(chartInstances.hwChart.options.colors[0]).toBe("#006495");
   });
 
   it("covers formatData callbacks for all chart types", () => {
@@ -336,6 +419,123 @@ describe("dashboard_charts.js", () => {
 
     context.renderCharts();
     expect(chartInstances.hwChart).toBeDefined();
+  });
+
+  it("applies explicit legend labels with unit type and id", () => {
+    const now = Date.now() / 1000;
+    evalInContext(
+      context,
+      `lastStatusData = {
+        hardware_units: [
+          { id: 'CUDA:0', type: 'CUDA', name: 'NVIDIA RTX' },
+          { id: 'GPU.0', type: 'GPU', name: 'Intel Graphics' },
+          { id: 'NPU.0', type: 'NPU', name: 'Intel AI Boost' }
+        ]
+      }`
+    );
+    evalInContext(
+      context,
+      `rollingTelemetryBuffer = [{
+        timestamp: ${now},
+        telemetry: { hardware_util: { 'CUDA:0': 90, 'GPU.0': 45, 'NPU.0': 65 }, nvidia: [{ util: 90 }] },
+        system: { cpu_percent: 20, app_cpu_percent: 8, app_memory_gb: 1.2 }
+      }]`
+    );
+
+    context.renderCharts();
+    const names = chartInstances.hwChart.options.series.map((s) => s.name);
+    expect(names).toContain("CUDA CUDA:0 - NVIDIA RTX");
+    expect(names).toContain("GPU GPU.0 - Intel Graphics");
+    expect(names).toContain("NPU NPU.0 - Intel AI Boost");
+  });
+
+  it("uses hybrid stroke and marker styles to distinguish CUDA, GPU, and NPU", () => {
+    const now = Date.now() / 1000;
+    evalInContext(
+      context,
+      `lastStatusData = {
+        hardware_units: [
+          { id: 'CUDA:0', type: 'CUDA', name: 'NVIDIA 0' },
+          { id: 'GPU.0', type: 'GPU', name: 'Intel GPU' },
+          { id: 'NPU.0', type: 'NPU', name: 'Intel NPU' }
+        ]
+      }`
+    );
+    evalInContext(
+      context,
+      `rollingTelemetryBuffer = Array.from({ length: 12 }, (_, i) => ({
+        timestamp: ${now} - (12 - i),
+        telemetry: { hardware_util: { 'CUDA:0': 80, 'GPU.0': 50, 'NPU.0': 70 }, nvidia: [{ util: 80 }] },
+        system: { cpu_percent: 22, app_cpu_percent: 9, app_memory_gb: 1.4 }
+      }))`
+    );
+
+    context.renderCharts();
+    const hwOptions = chartInstances.hwChart.options;
+    expect(hwOptions.stroke.width).toEqual([3, 3, 3]);
+    expect(hwOptions.stroke.dashArray).toEqual([0, 6, 2]);
+    expect(hwOptions.markers.size).toBe(0);
+    expect(Array.isArray(hwOptions.markers.discrete)).toBe(true);
+    expect(hwOptions.markers.discrete.length).toBeGreaterThan(0);
+
+    const markerShapes = new Set(hwOptions.markers.discrete.map((marker) => marker.shape));
+    expect(markerShapes.has("circle")).toBe(true);
+    expect(markerShapes.has("square")).toBe(true);
+    expect(markerShapes.has("triangle")).toBe(true);
+
+    const groupedIndices = hwOptions.markers.discrete.reduce((acc, marker) => {
+      const bucket = marker.shape;
+      acc[bucket] = acc[bucket] || [];
+      acc[bucket].push(marker.dataPointIndex);
+      return acc;
+    }, {});
+    const gpuIndices = groupedIndices.square || [];
+    const npuIndices = groupedIndices.triangle || [];
+    expect(gpuIndices.length).toBeGreaterThan(1);
+    expect(npuIndices.length).toBeGreaterThan(1);
+
+    const uniqueIntervals = (indices) => [...new Set(indices.slice(1).map((value, idx) => value - indices[idx]))];
+    const gpuIntervals = uniqueIntervals(gpuIndices);
+    const npuIntervals = uniqueIntervals(npuIndices);
+    expect(gpuIntervals.length).toBe(1);
+    expect(npuIntervals.length).toBe(1);
+
+    const cadenceMatches = gpuIntervals[0] === npuIntervals[0];
+    const indicesMatch = gpuIndices.join(",") === npuIndices.join(",");
+    expect(cadenceMatches && indicesMatch).toBe(false);
+  });
+
+  it("renders custom hardware legend badges with marker and dash previews", () => {
+    const now = Date.now() / 1000;
+    evalInContext(
+      context,
+      `lastStatusData = {
+        hardware_units: [
+          { id: 'CUDA:0', type: 'CUDA', name: 'NVIDIA 0' },
+          { id: 'GPU.0', type: 'GPU', name: 'Intel GPU' },
+          { id: 'NPU.0', type: 'NPU', name: 'Intel NPU' }
+        ]
+      }`
+    );
+    evalInContext(
+      context,
+      `rollingTelemetryBuffer = [{
+        timestamp: ${now},
+        telemetry: { hardware_util: { 'CUDA:0': 80, 'GPU.0': 50, 'NPU.0': 70 }, nvidia: [{ util: 80 }] },
+        system: { cpu_percent: 22, app_cpu_percent: 9, app_memory_gb: 1.4 }
+      }]`
+    );
+
+    context.renderCharts();
+
+    const legendItems = dom.window.document.querySelectorAll('#hw-legend .hw-legend-item');
+    expect(legendItems).toHaveLength(3);
+    expect(legendItems[0].textContent).toContain('CUDA CUDA:0 - NVIDIA 0');
+    expect(legendItems[1].querySelector('.hw-marker-square')).toBeTruthy();
+    expect(legendItems[2].querySelector('.hw-marker-triangle')).toBeTruthy();
+
+    const dashedLine = legendItems[1].querySelector('.hw-legend-line');
+    expect(dashedLine.style.getPropertyValue('--legend-line-pattern')).toContain('repeating-linear-gradient');
   });
 
   it("covers chart update with chart window change", () => {

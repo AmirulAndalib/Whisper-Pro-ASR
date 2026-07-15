@@ -8,14 +8,12 @@ media ingested by the service conforms to a uniform 16kHz MONO specification.
 
 import contextlib
 import contextvars
-import importlib
 import json
 import logging
 import os
-import subprocess
 import tempfile
 import threading
-import time
+from shutil import which
 
 import psutil
 
@@ -24,7 +22,7 @@ try:
 except ImportError:
     torch = None
 
-from modules.core import config
+from modules.core import config, process_exec, utils_helpers
 from modules.core.subtitles import (
     format_single_srt_block,
     format_timestamp,
@@ -38,15 +36,26 @@ from modules.core.utils_helpers import (
     cleanup_old_files,
     get_pretty_model_name,
     purge_temporary_assets,
+    run_ffmpeg_standardization,
     secure_remove,
     validate_audio,
 )
 
+_parse_ffmpeg_progress_impl = utils_helpers.parse_ffmpeg_progress
+
 # Reference to satisfy unused import check for public API consumption
-_ = (secure_remove, get_pretty_model_name, validate_audio, cleanup_old_files, purge_temporary_assets)
+_unused_api = (secure_remove, get_pretty_model_name, validate_audio, cleanup_old_files, purge_temporary_assets)
 
 # Re-export for public API and compatibility
-_ = (wrap_text, generate_srt, format_timestamp, generate_vtt, generate_txt, generate_tsv, format_single_srt_block)
+_reexports = (
+    wrap_text,
+    generate_srt,
+    format_timestamp,
+    generate_vtt,
+    generate_txt,
+    generate_tsv,
+    format_single_srt_block,
+)
 
 # Global process object for telemetry consistency
 _PROCESS_OBJ = psutil.Process(os.getpid())
@@ -67,6 +76,53 @@ def get_system_telemetry():
         "memory_total_gb": round(mem.total / (1024**3), 2),
         "app_memory_gb": round(app_mem_rss / (1024**3), 2),
     }
+
+
+def get_nvidia_vram_usage_mb() -> int | None:
+    """Return total used NVIDIA VRAM in MB across visible GPUs, or None if unavailable."""
+    nvidia_smi = which("nvidia-smi")
+    if not nvidia_smi:
+        return None
+
+    lines = _query_nvidia_vram_lines(nvidia_smi)
+    if lines is None:
+        return None
+
+    return _parse_nvidia_vram_total(lines)
+
+
+def _query_nvidia_vram_lines(nvidia_smi: str) -> list[str] | None:
+    """Query nvidia-smi and return raw memory-used lines."""
+    try:
+        output = process_exec.check_output_text(
+            [nvidia_smi, "--query-gpu=memory.used", "--format=csv,nounits,noheader"],
+            timeout=5.0,
+        )
+    except (
+        process_exec.CommandExecutionError,
+        process_exec.CommandTimeoutError,
+        FileNotFoundError,
+        OSError,
+    ):
+        return None
+    return output.splitlines()
+
+
+def _parse_nvidia_vram_total(lines: list[str]) -> int | None:
+    """Parse raw nvidia-smi memory-used lines and sum valid MB values."""
+    values = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            values.append(int(stripped.split(",")[0].strip()))
+        except ValueError:
+            continue
+
+    if not values:
+        return None
+    return sum(values)
 
 
 NOT_SET = object()
@@ -107,24 +163,9 @@ class ContextVarProxy:
         INPUT_FLAGS_VAR.set(None)
 
     def __getattr__(self, name):
-        if name == "tracked_files":
-            val = TRACKED_FILES_VAR.get()
-            if val is None:
-                val = []
-                TRACKED_FILES_VAR.set(val)
-            return val
-        if name == "filename":
-            val = FILENAME_VAR.get()
-            if val is NOT_SET:
-                raise AttributeError(f"'ContextVarProxy' object has no attribute '{name}'")
-            return val
-        if name == "source_path":
-            val = SOURCE_PATH_VAR.get()
-            if val is NOT_SET:
-                raise AttributeError(f"'ContextVarProxy' object has no attribute '{name}'")
-            return val
-        if name == "input_flags":
-            return INPUT_FLAGS_VAR.get()
+        special_val = _get_special_context_attr(name)
+        if special_val is not NOT_SET:
+            return special_val
         d = self._get_dict()
         if name in d:
             return d[name]
@@ -133,31 +174,77 @@ class ContextVarProxy:
     def __setattr__(self, name, value):
         if name == "_cv":
             super().__setattr__(name, value)
-        elif name == "tracked_files":
-            TRACKED_FILES_VAR.set(value)
-        elif name == "filename":
-            FILENAME_VAR.set(value)
-        elif name == "source_path":
-            SOURCE_PATH_VAR.set(value)
-        elif name == "input_flags":
-            INPUT_FLAGS_VAR.set(value)
-        else:
-            d = self._get_dict()
-            d[name] = value
+            return
+        if _set_special_context_attr(name, value):
+            return
+        d = self._get_dict()
+        d[name] = value
 
     def __delattr__(self, name):
-        if name == "tracked_files":
-            TRACKED_FILES_VAR.set(None)
-        elif name == "filename":
-            FILENAME_VAR.set(NOT_SET)
-        elif name == "source_path":
-            SOURCE_PATH_VAR.set(NOT_SET)
-        elif name == "input_flags":
-            INPUT_FLAGS_VAR.set(None)
-        else:
-            d = self._get_dict()
-            if name in d:
-                del d[name]
+        if _delete_special_context_attr(name):
+            return
+        d = self._get_dict()
+        if name in d:
+            del d[name]
+
+
+def _get_special_context_attr(name):
+    if name == "tracked_files":
+        return _get_or_create_tracked_files()
+    if name == "filename":
+        return _get_required_context_value(FILENAME_VAR, name)
+    if name == "source_path":
+        return _get_required_context_value(SOURCE_PATH_VAR, name)
+    if name == "input_flags":
+        return INPUT_FLAGS_VAR.get()
+    return NOT_SET
+
+
+def _get_or_create_tracked_files():
+    val = TRACKED_FILES_VAR.get()
+    if val is None:
+        val = []
+        TRACKED_FILES_VAR.set(val)
+    return val
+
+
+def _get_required_context_value(var, name: str):
+    val = var.get()
+    if val is NOT_SET:
+        raise AttributeError(f"'ContextVarProxy' object has no attribute '{name}'")
+    return val
+
+
+def _set_special_context_attr(name, value) -> bool:
+    if name == "tracked_files":
+        TRACKED_FILES_VAR.set(value)
+        return True
+    if name == "filename":
+        FILENAME_VAR.set(value)
+        return True
+    if name == "source_path":
+        SOURCE_PATH_VAR.set(value)
+        return True
+    if name == "input_flags":
+        INPUT_FLAGS_VAR.set(value)
+        return True
+    return False
+
+
+def _delete_special_context_attr(name) -> bool:
+    if name == "tracked_files":
+        TRACKED_FILES_VAR.set(None)
+        return True
+    if name == "filename":
+        FILENAME_VAR.set(NOT_SET)
+        return True
+    if name == "source_path":
+        SOURCE_PATH_VAR.set(NOT_SET)
+        return True
+    if name == "input_flags":
+        INPUT_FLAGS_VAR.set(None)
+        return True
+    return False
 
 
 # Global contextvars storage for request context (e.g. filename tracking, temp files)
@@ -185,34 +272,61 @@ def track_file(path):
 
 def cleanup_tracked_files(request=None):
     """Remove all files tracked in the current request's context and clear the registry."""
-    tracked = None
-    if request is not None and hasattr(request.state, "tracked_files"):
-        tracked = request.state.tracked_files
-    else:
-        tracked = REQUEST_TRACKED_FILES_VAR.get()
-
+    tracked = _resolve_request_scoped_tracked_files(request)
     if tracked is not None:
-        logger.debug("[System] Performing request-local storage hygiene on %d files (request scoped)", len(tracked))
-        for f_path in list(tracked):
-            secure_remove(f_path)
-        tracked.clear()
-    else:
-        files = get_tracked_files()
-        if files:
-            logger.debug("[System] Performing request-local storage hygiene on %d files (fallback)", len(files))
-            for f_path in list(files):
-                secure_remove(f_path)
-            files.clear()
+        _cleanup_tracked_file_list(tracked, "request scoped")
+        return
+    files = get_tracked_files()
+    if files:
+        _cleanup_tracked_file_list(files, "fallback")
+
+
+def _resolve_request_scoped_tracked_files(request=None):
+    if request is not None and hasattr(request.state, "tracked_files"):
+        return request.state.tracked_files
+    return REQUEST_TRACKED_FILES_VAR.get()
+
+
+def _cleanup_tracked_file_list(files: list, scope_label: str):
+    logger.debug("[System] Performing request-local storage hygiene on %d files (%s)", len(files), scope_label)
+    for f_path in list(files):
+        secure_remove(f_path)
+    files.clear()
 
 
 logger = logging.getLogger(__name__)
 
 
+def _cuda_device_count() -> int:
+    if not (torch and torch.cuda.is_available()):
+        return 0
+    return torch.cuda.device_count()
+
+
+def _clear_single_cuda_cache() -> None:
+    torch.cuda.empty_cache()
+    if hasattr(torch.cuda, "ipc_collect"):
+        torch.cuda.ipc_collect()
+
+
+def _clear_multi_cuda_cache(device_count: int) -> None:
+    for index in range(device_count):
+        with torch.cuda.device(index):
+            torch.cuda.empty_cache()
+            if hasattr(torch.cuda, "ipc_collect"):
+                torch.cuda.ipc_collect()
+
+
 def clear_gpu_cache():
     """Trigger explicit hardware cache reclamation if CUDA is present."""
     try:
-        if torch and torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        device_count = _cuda_device_count()
+        if device_count <= 0:
+            return
+        if device_count == 1:
+            _clear_single_cuda_cache()
+            return
+        _clear_multi_cuda_cache(device_count)
     except tuple([Exception]):
         pass
 
@@ -277,196 +391,80 @@ def prepare_for_uvr(source_path, yield_cb=None, input_flags=None):
 
 def _convert_base(source_path, flags, rate, channels, tag="Prep", *, yield_cb=None, input_flags=None):
     """Internal base for audio conversion."""
-    if not source_path or not os.path.exists(source_path):
-        logger.error("[%s] Media standardization failed: Source path missing.", tag)
-        return None
-
-    if os.path.getsize(source_path) == 0:
-        logger.error("[%s] Media standardization failed: Source file is empty.", tag)
+    if not _validate_source_path_for_conversion(source_path, tag):
         return None
 
     duration = get_audio_duration(source_path)
     logger.info("[%s] Stream analysis: %s (%s)", tag, os.path.basename(source_path), format_duration(duration))
-
-    # Estimate output size: rate * 2 bytes * channels * duration
-    estimated_bytes = int(duration * rate * 2 * channels) if duration > 0 else 0
-    temp_dir = config.get_temp_dir(required_bytes=estimated_bytes)
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False, dir=temp_dir) as temp_wav:
-        output_path = temp_wav.name
+    output_path = _allocate_temp_output_path(duration, rate, channels)
 
     try:
-        if yield_cb:
-            yield_cb()
-        _run_ffmpeg_standardization(
-            source_path, output_path, duration, flags, input_flags=input_flags, yield_cb=yield_cb
-        )
-        if yield_cb:
-            yield_cb()
+        _run_optional_yield(yield_cb)
+        _run_ffmpeg_standardization(source_path, output_path, duration, flags=flags, input_flags=input_flags, yield_cb=yield_cb)
+        _run_optional_yield(yield_cb)
         logger.info("[%s] Normalization sequence completed successfully.", tag)
         return track_file(output_path)
-
     except tuple([Exception]) as err:
-        logger.error("[%s] Media standardization failed: %s", tag, err)
-        if os.path.exists(output_path):
-            try:
-                os.remove(output_path)
-            except OSError:
-                pass
+        _log_and_cleanup_conversion_failure(tag, err, output_path)
         return None
 
 
+def _validate_source_path_for_conversion(source_path, tag: str) -> bool:
+    if not source_path or not os.path.exists(source_path):
+        logger.error("[%s] Media standardization failed: Source path missing.", tag)
+        return False
+    if os.path.getsize(source_path) == 0:
+        logger.error("[%s] Media standardization failed: Source file is empty.", tag)
+        return False
+    return True
+
+
+def _allocate_temp_output_path(duration: float, rate: int, channels: int) -> str:
+    estimated_bytes = int(duration * rate * 2 * channels) if duration > 0 else 0
+    temp_dir = config.get_temp_dir(required_bytes=estimated_bytes)
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False, dir=temp_dir) as temp_wav:
+        return temp_wav.name
+
+
+def _run_optional_yield(yield_cb=None):
+    if yield_cb:
+        yield_cb()
+
+
+def _log_and_cleanup_conversion_failure(tag: str, err: Exception, output_path: str):
+    logger.error("[%s] Media standardization failed: %s", tag, err)
+    if os.path.exists(output_path):
+        try:
+            os.remove(output_path)
+        except OSError:
+            pass
+
+
 def _run_ffmpeg_standardization(source_path, output_path, duration, flags=None, *, input_flags=None, yield_cb=None):
-    """Execute FFmpeg command with progress tracking."""
-    is_priority = getattr(THREAD_CONTEXT, "is_priority", False)
-    if not is_priority:
-        with STANDARD_FFMPEG_COND:
-            STANDARD_FFMPEG_STATE["count"] += 1
-            logger.debug("[Prep] Incrementing standard FFmpeg count: %d", STANDARD_FFMPEG_STATE["count"])
-
-    if input_flags is None:
-        input_flags = getattr(THREAD_CONTEXT, "input_flags", None)
-
-    try:
-        if flags is None:
-            flags = STANDARD_AUDIO_FLAGS
-
-        command = [
-            "ffmpeg",
-            "-threads",
-            str(config.FFMPEG_THREADS),
-            "-thread_queue_size",
-            "2048",
-            "-y",
-            "-loglevel",
-            "error",
-            "-filter_threads",
-            str(config.FFMPEG_THREADS),
-        ]
-
-        # Hardware Acceleration Injection
-        if config.FFMPEG_HWACCEL.lower() != "none":
-            command.extend(["-hwaccel", config.FFMPEG_HWACCEL])
-
-        # Input format flags
-        input_args = []
-        if input_flags:
-            input_args.extend(input_flags)
-        input_args.extend(["-i", source_path])
-
-        command.extend(
-            input_args + ["-progress", "pipe:1"] + flags + ["-af", STANDARD_NORMALIZATION_FILTERS, output_path]
-        )
-
-        # Watchdog timeout: dynamic based on duration if > 0, otherwise standard 300 seconds fallback.
-        ffmpeg_timeout = max(300.0, duration * 5.0) if duration > 0 else 300.0
-
-        # Merge stderr into stdout to avoid deadlock when stderr buffer fills up
-        with subprocess.Popen(
-            command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True
-        ) as process:
-            timeout_triggered = False
-
-            def kill_process():
-                nonlocal timeout_triggered
-                try:
-                    if process.poll() is None:
-                        timeout_triggered = True
-                        logger.warning(
-                            "[Prep] FFmpeg execution exceeded timeout (%.1fs). Terminating process.", ffmpeg_timeout
-                        )
-                        process.terminate()
-                        time.sleep(1.0)
-                        if process.poll() is None:
-                            process.kill()
-                except OSError:
-                    pass
-
-            timer = threading.Timer(ffmpeg_timeout, kill_process)
-            timer.start()
-            try:
-                final_speed = parse_ffmpeg_progress(process, duration, yield_cb=yield_cb)
-                process.wait()
-                if timeout_triggered:
-                    raise RuntimeError(f"FFmpeg standardization timed out after {ffmpeg_timeout}s")
-                logger.info("[Prep] FFmpeg finished | Speed: %s", final_speed)
-
-                if process.returncode != 0:
-                    raise RuntimeError(f"FFmpeg failed with return code {process.returncode}")
-            finally:
-                timer.cancel()
-    finally:
-        if not is_priority:
-            with STANDARD_FFMPEG_COND:
-                STANDARD_FFMPEG_STATE["count"] = max(0, STANDARD_FFMPEG_STATE["count"] - 1)
-                logger.debug("[Prep] Decrementing standard FFmpeg count: %d", STANDARD_FFMPEG_STATE["count"])
-                STANDARD_FFMPEG_COND.notify_all()
-
-
-def _handle_duration_progress(line, duration, last_stage_pct, last_logged_pct, yield_cb):
-    """Parse time progress and publish updates when duration is available."""
-    try:
-        time_ms = int(line.split("=")[1].strip())
-        time_sec = time_ms / 1000000.0
-        pct = (time_sec / duration) * 100
-
-        # Publish dashboard stage updates as FFmpeg progresses.
-        pct_int = max(0, min(100, int(pct)))
-        new_stage_pct = last_stage_pct
-        if pct_int >= last_stage_pct + 5:
-            try:
-                scheduler = importlib.import_module("modules.inference.scheduler")
-                scheduler.update_task_progress(None, f"FFmpeg ({pct_int}%)")
-            except (ImportError, RuntimeError, AttributeError, ValueError, TypeError, KeyError):
-                pass
-            if yield_cb:
-                yield_cb()
-            new_stage_pct = pct_int
-
-        new_logged_pct = last_logged_pct
-        if pct - last_logged_pct >= 10:
-            logger.info(
-                "[Prep] FFmpeg Status: %5.1f%% | %s / %s",
-                pct,
-                format_duration(time_sec),
-                format_duration(duration),
-            )
-            new_logged_pct = pct
-
-        return new_stage_pct, new_logged_pct
-    except (ValueError, IndexError):
-        return last_stage_pct, last_logged_pct
+    """Compatibility wrapper delegating FFmpeg standardization to utils_helpers."""
+    ffmpeg_env = {
+        "cfg": config,
+        "thread_context": THREAD_CONTEXT,
+        "standard_ffmpeg_cond": STANDARD_FFMPEG_COND,
+        "standard_ffmpeg_state": STANDARD_FFMPEG_STATE,
+        "standard_audio_flags": STANDARD_AUDIO_FLAGS,
+        "standard_normalization_filters": STANDARD_NORMALIZATION_FILTERS,
+        "format_duration": format_duration,
+    }
+    run_ffmpeg_standardization(
+        source_path,
+        output_path,
+        duration,
+        ffmpeg_env,
+        flags=flags,
+        input_flags=input_flags,
+        yield_cb=yield_cb,
+    )
 
 
 def parse_ffmpeg_progress(process, duration, yield_cb=None):
-    """Parse FFmpeg stdout for progress updates."""
-    last_logged_pct = -10
-    last_stage_pct = -1
-    final_speed = "N/A"
-    last_yield_time = 0.0
-    while True:
-        line = process.stdout.readline()
-        if not line:
-            break
-
-        if "speed=" in line:
-            try:
-                final_speed = line.split("=")[1].strip()
-            except (ValueError, IndexError):
-                pass
-
-        if "out_time_ms=" in line:
-            if duration > 0:
-                last_stage_pct, last_logged_pct = _handle_duration_progress(
-                    line, duration, last_stage_pct, last_logged_pct, yield_cb
-                )
-            else:
-                # unknown duration: yield periodically on progress output
-                current_time = time.time()
-                if current_time - last_yield_time >= 1.0:
-                    if yield_cb:
-                        yield_cb()
-                    last_yield_time = current_time
-    return final_speed
+    """Compatibility wrapper delegating FFmpeg progress parsing to utils_helpers."""
+    return _parse_ffmpeg_progress_impl(process, duration, format_duration, yield_cb=yield_cb)
 
 
 def get_audio_duration(file_path):
@@ -482,8 +480,8 @@ def get_audio_duration(file_path):
             "default=noprint_wrappers=1:nokey=1",
             file_path,
         ]
-        result = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=10)
-        return float(result.decode("utf-8").strip())
+        result = process_exec.check_output_text(cmd, timeout=10).strip()
+        return float(result)
     except tuple([Exception]):
         # Calculate duration based on file size if input is raw PCM
         try:

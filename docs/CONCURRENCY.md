@@ -38,6 +38,7 @@ Whisper Pro uses a **Hardware Resource Pool** to balance I/O-bound tasks, CPU-bo
 | `model_lock_ctx` | **Re-entrant Lock** | Thread-Local | Allows nested sub-tasks (UVR → ASR → Diarization) to share the same hardware claim. |
 | `STATE.priority_lock` | `threading.Lock` | Global | Protects priority counters and pre-emption signals. |
 | `_POOL_LOCK` | `threading.Lock` | Global | Serializes model loading and unloading operations to prevent race conditions during engine state transitions. |
+| `_OPENVINO_INIT_LOCKS[family]` | `threading.Lock` | Accelerator-family | Serializes first-time OpenVINO UVR initialization per family (`GPU`, `NPU`) while allowing GPU and NPU first-load paths to proceed independently. |
 
 ### Indefinite Wait Policy
 
@@ -195,4 +196,4 @@ When `diarize=true` is passed to `/asr`, the diarization pipeline runs **within 
 - **No additional hardware claims**: Alignment and diarization share the unit already claimed for transcription.
 - **Cache isolation**: Each hardware unit maintains its own `_ALIGN_POOL` and `_DIARIZE_POOL` entries, preventing cross-unit cache collisions.
 - **Preemption safety**: Diarization stages respect the same `_check_preemption()` cooperative yielding checks as transcription.
-- **Graceful fallback**: If diarization fails (missing `HF_TOKEN`, model download failure, etc.), the system returns non-diarized transcription results without raising an error to the client.
+- **Graceful fallback**: If diarization fails (missing `DIARIZATION_HF_TOKEN`, model download failure, etc.), the system returns non-diarized transcription results without raising an error to the client.

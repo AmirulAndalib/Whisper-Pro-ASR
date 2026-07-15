@@ -2,10 +2,10 @@
 const path = require("path");
 const { evalInContext, loadScriptInContext } = require("./helpers");
 
-describe("dashboard_state.js", () => {
+describe("state.js", () => {
   it("initializes dashboard state globals", () => {
     const context = loadScriptInContext(
-      path.join(__dirname, "../../modules/monitoring/templates/dashboard_state.js")
+      path.join(__dirname, "../../modules/monitoring/templates/dashboard/core/state.js")
     );
 
     expect(evalInContext(context, "currentTab")).toBe("active");

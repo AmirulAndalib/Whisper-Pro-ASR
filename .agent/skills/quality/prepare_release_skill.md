@@ -1,10 +1,10 @@
 # Prepare Release Skill
 
-This skill outlines the structured workflow to prepare a new release of Whisper Pro ASR from a feature branch.
+This skill defines the release preparation workflow for Whisper Pro ASR from an active working branch.
 
 ## Objective
 
-Extract the target version from the current feature branch name (e.g., `feature/v1.1.4` -> version `v1.1.4`), verify code quality and performance gates, review the whole current commit for documentation and release-note drift, update project documentation, generate release notes, and consolidate all modifications into a unified amended commit.
+Determine the target release version, verify quality gates, review documentation/release-note drift across the full change set, update docs, generate release notes, and produce a clean release-ready commit.
 
 ---
 
@@ -12,59 +12,65 @@ Extract the target version from the current feature branch name (e.g., `feature/
 
 ### 1. Identify Release Version
 
-Extract the version identifier from the active git branch name:
+Determine the release version in this order:
+
+1. If branch name matches `feature/vX.Y.Z`, use `X.Y.Z`.
+2. Otherwise, if branch name matches `release/vX.Y.Z`, `feature/X.Y.Z`, or `release/X.Y.Z`, use `X.Y.Z`.
+3. Otherwise, use an explicitly provided release version.
+4. If neither is available, stop and request the target version before publishing release notes.
 
 ```bash
 # Display active branch name
 git branch --show-current
 ```
 
-*Example*: If on branch `feature/v1.1.4`, the release tag and documentation target version is `v1.1.4`.
+*Example*: On branch `feature/v1.1.6`, release tag/docs target version is `v1.1.6`.
 
 ### 2. Verify Pipeline Quality Gates
 
-Ensure all tests are passing and the linter score is perfect before locking the release:
+Ensure tests and lint gates are passing before release finalization:
 
-- **Pytest**: Run unit and integration suites to ensure a 100% pass rate.
-
-  ```bash
-  python3 -m pytest tests/
-  ```
-
-- **Code Coverage**: Verify total test coverage is above the build-gate threshold (**>= 90%**).
-- **Flake8**: Enforce style compliance with strict policy (`max-line-length=140`) and no ignore directives.
+- Run Docker-backed parity wrapper (preferred):
 
   ```bash
-  python3 -m flake8 modules whisper_pro_asr.py tests tests/check_coverage.py
+  ./scripts/ci/build-and-test.sh
   ```
 
-- **Pylint**: Run static analysis across all python files and verify it receives a perfect **10.0/10.0** rating with no suppressions.
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File .\scripts\ci\build-and-test.ps1
+  ```
+
+- Or run the explicit Docker test image/entrypoint (still Docker-only):
 
   ```bash
-  pylint modules/ tests/ whisper_pro_asr.py tests/check_coverage.py
+  docker build -f Dockerfile.test --target test -t whisper-pro-asr-test .
+  docker run --rm -e CI=true -v "$PWD/assets:/app/assets" -v "$PWD/reports:/reports" whisper-pro-asr-test /bin/bash -lc "tests/run_suite.sh"
   ```
+
+- Required gates remain unchanged: backend tests, coverage >= 90%, flake8/pylint quality, frontend quality + npm audit, markdown lint (when markdown changed).
 
 ### 3. Update Project Documentation
 
-Ensure all documentation files are synchronized with codebase features:
+Ensure all documentation files are synchronized with the actual shipped behavior:
 
 - Review the full current commit diff first so docs and release notes are checked against every changed file, not only the most obvious feature file.
-- **README.md**: Document new parameters, environmental flags, API routes, and update directory tree structures.
-- **docs/ARCHITECTURE.md**: Document deep-dives on concurrency mechanisms, lifecycle threads, caching, and model offloading patterns.
-- **docs/API.md**: Update route schemas, query parameters, returned formats, and example JSON payloads.
-- **docs/DOCKERHUB_DESCRIPTION.md**: Update features and sync with README changes.
+- **README.md**: Update user-visible capabilities, command snippets, and template/module tree references.
+- **docs/ARCHITECTURE.md**: Keep pipeline, locking, lifecycle, and monitoring structure details accurate.
+- **docs/API.md**: Keep endpoint classes, parameters, and outputs accurate.
+- **docs/DOCKERHUB_DESCRIPTION.md**: Keep feature summary aligned with README.
+- **.agent/** skills/workflows: Update when behavior, quality gates, or execution policy changed.
 
 ### 4. Generate GitHub Release Notes
 
-Create a new version-specific markdown release file at `docs/releases/GITHUB_RELEASE_v<VERSION>.md`:
+Create or update the version-specific markdown release file at `docs/releases/GITHUB_RELEASE_v<VERSION>.md`:
 
 - Highlight key features and structural improvements.
 - Document optimizations, bug fixes, and security enhancements.
-- Include verification results (test passes, Playwright E2E result from `npm run test:e2e`, Flake8 status, Pylint rating, and coverage totals).
+- Include verification results (backend/frontend tests, Playwright E2E, coverage, lint, audit status).
 
-### 5. Consolidate & Amend Git Commit
+### 5. Consolidate Git Commit
 
-A new release must reside in a single, well-documented commit at the head of the feature branch:
+A release change set should be staged and committed with a descriptive message:
 
 - Stage all modified files and the new release markdown file:
 
@@ -72,10 +78,10 @@ A new release must reside in a single, well-documented commit at the head of the
   git add -A
   ```
 
-- Amend the commit to include all changes under a descriptive title and detailed summary of changes:
+- Create a release commit with a descriptive title and concise summary bullets:
 
   ```bash
-  git commit --amend -m "v1.x.y: Short Summary of Main Features
+  git commit -m "v1.x.y: Short Summary of Main Features
 
   - Detailed bullet point 1
   - Detailed bullet point 2"
@@ -90,3 +96,5 @@ A new release must reside in a single, well-documented commit at the head of the
     exit 1
   fi
   ```
+
+Do not amend commits unless explicitly requested.

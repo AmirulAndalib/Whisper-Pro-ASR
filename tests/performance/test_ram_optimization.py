@@ -4,7 +4,7 @@ from unittest import mock
 
 import pytest
 
-from modules.api import routes_utils as routes
+from modules.api.support import request_utils as routes
 
 
 class TestRAMOptimization:
@@ -19,7 +19,7 @@ class TestRAMOptimization:
         mock_file.file = mock.MagicMock()
         mock_file.file.read.side_effect = [b"a" * 2048, b""]
 
-        with mock.patch("modules.api.routes_utils.config") as cfg:
+        with mock.patch("modules.api.support.request_utils.config") as cfg:
             cfg.get_temp_dir.return_value = "/tmp/whisper"
             with mock.patch("os.path.getsize", return_value=2048):
                 with mock.patch("builtins.open", mock.mock_open()):
@@ -38,7 +38,7 @@ class TestRAMOptimization:
         mock_file.file = mock.MagicMock()
         mock_file.file.read.side_effect = [b"\x00" * 2048, b""]
 
-        with mock.patch("modules.api.routes_utils.config") as cfg:
+        with mock.patch("modules.api.support.request_utils.config") as cfg:
             cfg.get_temp_dir.return_value = "/tmp/whisper"
             with mock.patch("os.path.getsize", return_value=2048):
                 # Mock reading back the header (all zeros)

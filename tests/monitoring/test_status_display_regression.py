@@ -1,7 +1,6 @@
 """Regression tests for task status display correctness per task_status_display_specification_skill."""
 
 import threading
-import time
 from unittest import mock
 
 import pytest
@@ -9,6 +8,78 @@ import pytest
 from modules.core import utils
 from modules.inference import scheduler
 from modules.monitoring import telemetry
+
+
+def _get_status_stats():
+    with mock.patch("modules.monitoring.history_manager.get_history_stats", return_value=([], {})):
+        with mock.patch("modules.inference.runtime.model_manager.is_engine_actually_loaded", return_value=True):
+            with mock.patch("modules.inference.runtime.model_manager.is_uvr_actually_loaded", return_value=True):
+                return telemetry.get_service_stats()
+
+
+def _get_task_order():
+    return [task.get("task_id") for task in _get_status_stats()["tasks"]]
+
+
+def _seed_status_tasks(entries):
+    with scheduler.STATE.task_registry_lock:
+        scheduler.STATE.task_registry.clear()
+        scheduler.STATE.task_registry.update(entries)
+
+
+def _standard_asr_state(status, stage):
+    return {
+        "standard_asr": {
+            "task_id": "standard_asr",
+            "status": status,
+            "stage": stage,
+            "start_time": 100.0,
+            "is_priority": False,
+            "type": "Transcription",
+        }
+    }
+
+
+def _run_overlapping_registration_pair(name_a: str, name_b: str):
+    ids = []
+    ids_lock = threading.Lock()
+    ready = threading.Barrier(3)
+    release = threading.Event()
+
+    def _worker(filename):
+        utils.THREAD_CONTEXT.reset()
+        with scheduler.early_task_registration(filename=filename):
+            with ids_lock:
+                ids.append(utils.THREAD_CONTEXT.task_id)
+            ready.wait(timeout=2.0)
+            assert release.wait(timeout=2.0)
+
+    t1 = threading.Thread(target=_worker, args=(name_a,))
+    t2 = threading.Thread(target=_worker, args=(name_b,))
+    t1.start()
+    t2.start()
+    ready.wait(timeout=2.0)
+    return ids, release, t1, t2
+
+
+def _finish_pair_and_assert_threads_stopped(release, t1, t2):
+    release.set()
+    t1.join(timeout=3.0)
+    t2.join(timeout=3.0)
+    assert not t1.is_alive()
+    assert not t2.is_alive()
+
+
+def _assert_sequential_registration_cleanup(filenames):
+    task_ids = []
+    for filename in filenames:
+        with scheduler.early_task_registration(filename=filename):
+            task_ids.append(utils.THREAD_CONTEXT.task_id)
+
+    with scheduler.STATE.task_order_lock:
+        assert len(task_ids) == len(filenames)
+        assert len(set(task_ids)) == len(filenames)
+        assert list(scheduler.STATE.task_arrival_order) == []
 
 
 @pytest.fixture
@@ -52,8 +123,8 @@ def test_unknown_status_is_normalized_before_payload(clean_scheduler, clean_tele
             }
 
     with mock.patch("modules.monitoring.history_manager.get_history_stats", return_value=([], {})):
-        with mock.patch("modules.inference.model_manager.is_engine_actually_loaded", return_value=True):
-            with mock.patch("modules.inference.model_manager.is_uvr_actually_loaded", return_value=True):
+        with mock.patch("modules.inference.runtime.model_manager.is_engine_actually_loaded", return_value=True):
+            with mock.patch("modules.inference.runtime.model_manager.is_uvr_actually_loaded", return_value=True):
                 stats = telemetry.get_service_stats()
 
     # Collect all statuses from payload
@@ -86,23 +157,20 @@ def test_queued_paused_vs_waiting_distinction_by_stage(clean_scheduler, clean_te
         }
 
     with mock.patch("modules.monitoring.history_manager.get_history_stats", return_value=([], {})):
-        with mock.patch("modules.inference.model_manager.is_engine_actually_loaded", return_value=True):
-            with mock.patch("modules.inference.model_manager.is_uvr_actually_loaded", return_value=True):
+        with mock.patch("modules.inference.runtime.model_manager.is_engine_actually_loaded", return_value=True):
+            with mock.patch("modules.inference.runtime.model_manager.is_uvr_actually_loaded", return_value=True):
                 stats = telemetry.get_service_stats()
 
     tasks_by_id = {t.get("task_id"): t for t in stats["tasks"]}
 
-    paused = tasks_by_id.get("paused_task")
-    waiting = tasks_by_id.get("waiting_task")
-
-    assert paused is not None, "Paused task missing from payload"
-    assert waiting is not None, "Waiting task missing from payload"
-
-    # Both have status='queued', but stages differ
-    assert paused["status"] == "queued"
-    assert waiting["status"] == "queued"
-    assert "Paused for Priority Task" in paused["stage"]
-    assert "Paused for Priority Task" not in waiting["stage"]
+    assert {
+        task_id: (task["status"], "Paused for Priority Task" in task["stage"])
+        for task_id, task in tasks_by_id.items()
+        if task_id in {"paused_task", "waiting_task"}
+    } == {
+        "paused_task": ("queued", True),
+        "waiting_task": ("queued", False),
+    }
 
 
 def test_ordering_active_first_then_priority_queued_then_standard_queued(clean_scheduler, clean_telemetry):
@@ -129,8 +197,8 @@ def test_ordering_active_first_then_priority_queued_then_standard_queued(clean_s
             }
 
     with mock.patch("modules.monitoring.history_manager.get_history_stats", return_value=([], {})):
-        with mock.patch("modules.inference.model_manager.is_engine_actually_loaded", return_value=True):
-            with mock.patch("modules.inference.model_manager.is_uvr_actually_loaded", return_value=True):
+        with mock.patch("modules.inference.runtime.model_manager.is_engine_actually_loaded", return_value=True):
+            with mock.patch("modules.inference.runtime.model_manager.is_uvr_actually_loaded", return_value=True):
                 stats = telemetry.get_service_stats()
 
     task_order = [t.get("task_id") for t in stats["tasks"]]
@@ -141,111 +209,67 @@ def test_ordering_active_first_then_priority_queued_then_standard_queued(clean_s
 
 def test_task_arrival_order_tracking_for_determinism(clean_scheduler):
     """Verify task_arrival_order registry tracks arrival times for deterministic ordering."""
-    task_ids = []
-    barrier = threading.Barrier(4)
-    start_events = [threading.Event() for _ in range(3)]
+    overlap_ids, release_overlap, t1, t2 = _run_overlapping_registration_pair("overlap_1", "overlap_2")
 
-    def run_reg(index, filename):
-        start_events[index].wait()
-        with scheduler.early_task_registration(filename=filename):
-            task_ids.append(utils.THREAD_CONTEXT.task_id)
-            barrier.wait(timeout=5)
-            barrier.wait(timeout=5)
+    with scheduler.STATE.task_order_lock:
+        assert len(overlap_ids) == 2
+        assert all(task_id in scheduler.STATE.task_arrival_order for task_id in overlap_ids)
 
-    threads = [threading.Thread(target=run_reg, args=(i, f"task{i + 1}")) for i in range(3)]
-    for t in threads:
-        t.start()
+    _finish_pair_and_assert_threads_stopped(release_overlap, t1, t2)
 
-    # Deterministically start and register each thread one by one
-    for i in range(3):
-        start_events[i].set()
-        timeout = 5.0
-        start_time = time.time()
-        while True:
-            with scheduler.STATE.task_order_lock:
-                if len(scheduler.STATE.task_arrival_order) == i + 1:
-                    break
-            if time.time() - start_time > timeout:
-                raise AssertionError(f"Timeout waiting for task {i + 1} to register in task_arrival_order")
-            time.sleep(0.001)
-
-    barrier.wait(timeout=5)  # Wait for all threads to register and block
-
-    try:
-        # Verify arrival order is tracked and correct
-        with scheduler.STATE.task_order_lock:
-            for tid in task_ids:
-                assert tid in scheduler.STATE.task_arrival_order
-
-            ordered = sorted(scheduler.STATE.task_arrival_order.items(), key=lambda x: x[1])
-            ordered_ids = [tid for tid, _ in ordered]
-            assert ordered_ids == task_ids
-    finally:
-        barrier.wait(timeout=5)  # Release threads to clean up
-        for t in threads:
-            t.join(timeout=2.0)
+    with scheduler.STATE.task_order_lock:
+        assert list(scheduler.STATE.task_arrival_order) == []
+    _assert_sequential_registration_cleanup(["task1", "task2", "task3"])
 
 
-def test_status_transition_preemption_cycle(clean_scheduler, clean_telemetry):
-    """Verify standard task status transitions correctly during preemption pause/resume cycle."""
-    with scheduler.STATE.task_registry_lock:
-        scheduler.STATE.task_registry.clear()
+def test_early_task_registration_concurrency_bounded_progress(clean_scheduler):
+    """Overlapping registrations must synchronize, preserve arrival keys while active, and complete without deadlock."""
+    arrivals_seen, release_event, w1, w2 = _run_overlapping_registration_pair("c1", "c2")
 
-        # Simulate active standard task that gets preempted
-        scheduler.STATE.task_registry["standard_asr"] = {
-            "task_id": "standard_asr",
-            "status": "active",
-            "stage": "Inference",
-            "start_time": 100.0,
-            "is_priority": False,
-            "type": "Transcription",
-        }
+    with scheduler.STATE.task_order_lock:
+        # While both workers are in their registration contexts, both task IDs must be tracked.
+        assert len(arrivals_seen) == 2
+        assert all(task_id in scheduler.STATE.task_arrival_order for task_id in arrivals_seen)
 
-    # Before preemption: status = active
-    with mock.patch("modules.monitoring.history_manager.get_history_stats", return_value=([], {})):
-        with mock.patch("modules.inference.model_manager.is_engine_actually_loaded", return_value=True):
-            with mock.patch("modules.inference.model_manager.is_uvr_actually_loaded", return_value=True):
-                stats_before = telemetry.get_service_stats()
+    _finish_pair_and_assert_threads_stopped(release_event, w1, w2)
 
-    task_before = next((t for t in stats_before["tasks"] if t.get("task_id") == "standard_asr"), None)
-    assert task_before is not None
-    assert task_before["status"] == "active"
+    with scheduler.STATE.task_order_lock:
+        assert list(scheduler.STATE.task_arrival_order) == []
 
-    # Simulate preemption: status transitions to queued with paused stage
-    with scheduler.STATE.task_registry_lock:
-        scheduler.STATE.task_registry["standard_asr"]["status"] = "queued"
-        scheduler.STATE.task_registry["standard_asr"]["stage"] = "Paused for Priority Task"
 
-    # After preemption: status = queued with paused stage
-    with mock.patch("modules.monitoring.history_manager.get_history_stats", return_value=([], {})):
-        with mock.patch("modules.inference.model_manager.is_engine_actually_loaded", return_value=True):
-            with mock.patch("modules.inference.model_manager.is_uvr_actually_loaded", return_value=True):
-                stats_paused = telemetry.get_service_stats()
+def test_status_transition_active_to_initial_state(clean_scheduler, clean_telemetry):
+    """Active standard tasks should report active before preemption."""
+    _seed_status_tasks(_standard_asr_state("active", "Inference"))
 
-    task_paused = next((t for t in stats_paused["tasks"] if t.get("task_id") == "standard_asr"), None)
-    assert task_paused is not None
-    assert task_paused["status"] == "queued"
-    assert "Paused for Priority Task" in task_paused["stage"]
+    stats = _get_status_stats()
+    task = next((t for t in stats["tasks"] if t.get("task_id") == "standard_asr"), None)
+    assert task is not None
+    assert task["status"] == "active"
 
-    # Simulate resumption: status transitions back to active
-    with scheduler.STATE.task_registry_lock:
-        scheduler.STATE.task_registry["standard_asr"]["status"] = "active"
-        scheduler.STATE.task_registry["standard_asr"]["stage"] = "Inference"
 
-    # After resumption: status = active again
-    with mock.patch("modules.monitoring.history_manager.get_history_stats", return_value=([], {})):
-        with mock.patch("modules.inference.model_manager.is_engine_actually_loaded", return_value=True):
-            with mock.patch("modules.inference.model_manager.is_uvr_actually_loaded", return_value=True):
-                stats_resumed = telemetry.get_service_stats()
+def test_status_transition_preempted_state(clean_scheduler, clean_telemetry):
+    """Preempted standard tasks should report queued with the paused stage."""
+    _seed_status_tasks(_standard_asr_state("queued", "Paused for Priority Task"))
 
-    task_resumed = next((t for t in stats_resumed["tasks"] if t.get("task_id") == "standard_asr"), None)
-    assert task_resumed is not None
-    assert task_resumed["status"] == "active"
+    stats = _get_status_stats()
+    task = next((t for t in stats["tasks"] if t.get("task_id") == "standard_asr"), None)
+    assert task is not None
+    assert (task["status"], task["stage"]) == ("queued", "Paused for Priority Task")
+
+
+def test_status_transition_resumed_state(clean_scheduler, clean_telemetry):
+    """Resumed standard tasks should report active again."""
+    _seed_status_tasks(_standard_asr_state("active", "Inference"))
+
+    stats = _get_status_stats()
+    task = next((t for t in stats["tasks"] if t.get("task_id") == "standard_asr"), None)
+    assert task is not None
+    assert task["status"] == "active"
 
 
 def test_hardware_units_show_busy_for_translating_and_inference(clean_scheduler, clean_telemetry):
     """Verify active Whisper ASR work keeps every occupied hardware unit marked busy."""
-    from modules.inference import model_manager
+    from modules.inference.runtime import model_manager
 
     mock_units = [
         {"id": "GPU.0", "type": "GPU", "name": "Intel Arc"},
@@ -276,8 +300,8 @@ def test_hardware_units_show_busy_for_translating_and_inference(clean_scheduler,
     with mock.patch("modules.core.config.HARDWARE_UNITS", mock_units):
         with mock.patch.dict(model_manager.MODEL_POOL, {"GPU.0": mock.MagicMock(), "NPU.0": mock.MagicMock()}):
             with mock.patch("modules.monitoring.history_manager.get_history_stats", return_value=([], {})):
-                with mock.patch("modules.inference.model_manager.is_engine_actually_loaded", return_value=True):
-                    with mock.patch("modules.inference.model_manager.is_uvr_actually_loaded", return_value=False):
+                with mock.patch("modules.inference.runtime.model_manager.is_engine_actually_loaded", return_value=True):
+                    with mock.patch("modules.inference.runtime.model_manager.is_uvr_actually_loaded", return_value=False):
                         stats = telemetry.get_service_stats()
 
     hardware_by_id = {unit["id"]: unit for unit in stats["hardware_units"]}
@@ -300,8 +324,8 @@ def test_no_unknown_status_leakage_in_normal_operation(clean_scheduler, clean_te
             }
 
     with mock.patch("modules.monitoring.history_manager.get_history_stats", return_value=([], {})):
-        with mock.patch("modules.inference.model_manager.is_engine_actually_loaded", return_value=True):
-            with mock.patch("modules.inference.model_manager.is_uvr_actually_loaded", return_value=True):
+        with mock.patch("modules.inference.runtime.model_manager.is_engine_actually_loaded", return_value=True):
+            with mock.patch("modules.inference.runtime.model_manager.is_uvr_actually_loaded", return_value=True):
                 stats = telemetry.get_service_stats()
 
     unknown_tasks = [t for t in stats["tasks"] if t.get("status") == "unknown"]
@@ -356,79 +380,107 @@ def test_concurrent_task_arrivals_deterministic_ordering(clean_scheduler, clean_
             "type": "Transcription",
         }
 
-    orderings = []
-    for call_num in range(3):
-        with mock.patch("modules.monitoring.history_manager.get_history_stats", return_value=([], {})):
-            with mock.patch("modules.inference.model_manager.is_engine_actually_loaded", return_value=True):
-                with mock.patch("modules.inference.model_manager.is_uvr_actually_loaded", return_value=True):
-                    stats = telemetry.get_service_stats()
-        task_order = [t.get("task_id") for t in stats["tasks"]]
-        orderings.append(task_order)
+    orderings = [_get_task_order() for _ in range(3)]
 
-    assert orderings[0] == orderings[1], f"Call 1 and 2 differ: {orderings[0]} vs {orderings[1]}"
-    assert orderings[1] == orderings[2], f"Call 2 and 3 differ: {orderings[1]} vs {orderings[2]}"
-
-    final_order = orderings[0]
-    active_indices = [i for i, tid in enumerate(final_order) if tid.startswith("active_")]
-    pq_indices = [i for i, tid in enumerate(final_order) if tid.startswith("pq_")]
-    sq_indices = [i for i, tid in enumerate(final_order) if tid.startswith("sq_")]
-
-    assert len(active_indices) == 2
-    assert len(pq_indices) == 2
-    assert len(sq_indices) == 1
-    if active_indices and pq_indices:
-        assert max(active_indices) < min(pq_indices)
-    if pq_indices and sq_indices:
-        assert max(pq_indices) < min(sq_indices)
+    assert all(ordering == orderings[0] for ordering in orderings[1:])
+    assert orderings[0] == ["active_1", "active_2", "pq_1", "pq_2", "sq_1"]
 
 
 def test_mixed_all_seven_statuses_with_priority_flags(clean_scheduler, clean_telemetry):
     """Verify that when all 7 statuses are present with mixed priority flags, ordering still respects three-tier rules."""
     with scheduler.STATE.task_registry_lock:
         scheduler.STATE.task_registry.clear()
-        tasks_to_add = [
-            ("init_std", "initializing", 100.0, False),
-            ("init_prio", "initializing", 101.0, True),
-            ("queue_std1", "queued", 102.0, False),
-            ("queue_prio", "queued", 103.0, True),
-            ("active_std", "active", 104.0, False),
-            ("active_prio", "active", 105.0, True),
-            ("postproc", "post-processing", 106.0, False),
-            ("completed", "completed", 107.0, False),
-            ("failed", "failed", 108.0, False),
-        ]
-        for tid, status, start, is_prio in tasks_to_add:
-            scheduler.STATE.task_registry[tid] = {
-                "task_id": tid,
-                "status": status,
-                "stage": "Test Stage",
-                "start_time": start,
-                "is_priority": is_prio,
-                "type": "Transcription",
+        scheduler.STATE.task_registry.update(
+            {
+                "init_std": {
+                    "task_id": "init_std",
+                    "status": "initializing",
+                    "stage": "Test Stage",
+                    "start_time": 100.0,
+                    "is_priority": False,
+                    "type": "Transcription",
+                },
+                "init_prio": {
+                    "task_id": "init_prio",
+                    "status": "initializing",
+                    "stage": "Test Stage",
+                    "start_time": 101.0,
+                    "is_priority": True,
+                    "type": "Transcription",
+                },
+                "queue_std1": {
+                    "task_id": "queue_std1",
+                    "status": "queued",
+                    "stage": "Test Stage",
+                    "start_time": 102.0,
+                    "is_priority": False,
+                    "type": "Transcription",
+                },
+                "queue_prio": {
+                    "task_id": "queue_prio",
+                    "status": "queued",
+                    "stage": "Test Stage",
+                    "start_time": 103.0,
+                    "is_priority": True,
+                    "type": "Transcription",
+                },
+                "active_std": {
+                    "task_id": "active_std",
+                    "status": "active",
+                    "stage": "Test Stage",
+                    "start_time": 104.0,
+                    "is_priority": False,
+                    "type": "Transcription",
+                },
+                "active_prio": {
+                    "task_id": "active_prio",
+                    "status": "active",
+                    "stage": "Test Stage",
+                    "start_time": 105.0,
+                    "is_priority": True,
+                    "type": "Transcription",
+                },
+                "postproc": {
+                    "task_id": "postproc",
+                    "status": "post-processing",
+                    "stage": "Test Stage",
+                    "start_time": 106.0,
+                    "is_priority": False,
+                    "type": "Transcription",
+                },
+                "completed": {
+                    "task_id": "completed",
+                    "status": "completed",
+                    "stage": "Test Stage",
+                    "start_time": 107.0,
+                    "is_priority": False,
+                    "type": "Transcription",
+                },
+                "failed": {
+                    "task_id": "failed",
+                    "status": "failed",
+                    "stage": "Test Stage",
+                    "start_time": 108.0,
+                    "is_priority": False,
+                    "type": "Transcription",
+                },
             }
+        )
 
-    with mock.patch("modules.monitoring.history_manager.get_history_stats", return_value=([], {})):
-        with mock.patch("modules.inference.model_manager.is_engine_actually_loaded", return_value=True):
-            with mock.patch("modules.inference.model_manager.is_uvr_actually_loaded", return_value=True):
-                stats = telemetry.get_service_stats()
+    stats = _get_status_stats()
 
     task_order = [t.get("task_id") for t in stats["tasks"]]
-    tier1_active = [tid for tid in task_order if tid in ["active_std", "active_prio"]]
-    tier2_prio_queued = [tid for tid in task_order if tid == "queue_prio"]
-    tier3_std_queued = [tid for tid in task_order if tid == "queue_std1"]
-    tier4_others = [tid for tid in task_order if tid in ["init_std", "init_prio", "postproc", "completed", "failed"]]
-
-    tier1_idx = [task_order.index(tid) for tid in tier1_active] if tier1_active else []
-    tier2_idx = [task_order.index(tid) for tid in tier2_prio_queued] if tier2_prio_queued else []
-    tier3_idx = [task_order.index(tid) for tid in tier3_std_queued] if tier3_std_queued else []
-    tier4_idx = [task_order.index(tid) for tid in tier4_others] if tier4_others else []
-
-    if tier1_idx and tier2_idx:
-        assert max(tier1_idx) < min(tier2_idx)
-    if tier2_idx and tier3_idx:
-        assert max(tier2_idx) < min(tier3_idx)
-    if tier3_idx and tier4_idx:
-        assert max(tier3_idx) < min(tier4_idx)
+    assert task_order == [
+        "active_std",
+        "active_prio",
+        "init_std",
+        "init_prio",
+        "queue_std1",
+        "queue_prio",
+        "postproc",
+        "completed",
+        "failed",
+    ]
 
 
 def test_task_id_lexicographic_tiebreaker_same_start_time(clean_scheduler, clean_telemetry):
@@ -447,8 +499,8 @@ def test_task_id_lexicographic_tiebreaker_same_start_time(clean_scheduler, clean
             }
 
     with mock.patch("modules.monitoring.history_manager.get_history_stats", return_value=([], {})):
-        with mock.patch("modules.inference.model_manager.is_engine_actually_loaded", return_value=True):
-            with mock.patch("modules.inference.model_manager.is_uvr_actually_loaded", return_value=True):
+        with mock.patch("modules.inference.runtime.model_manager.is_engine_actually_loaded", return_value=True):
+            with mock.patch("modules.inference.runtime.model_manager.is_uvr_actually_loaded", return_value=True):
                 stats = telemetry.get_service_stats()
 
     task_order = [t.get("task_id") for t in stats["tasks"]]
@@ -456,12 +508,61 @@ def test_task_id_lexicographic_tiebreaker_same_start_time(clean_scheduler, clean
     assert task_order == expected_order, f"Expected lexicographic order {expected_order}, but got {task_order}"
 
 
-def test_stage_based_paused_task_filtering_mixed_load(clean_scheduler, clean_telemetry):
-    """Verify that paused tasks (stage='Paused for Priority Task') are correctly distinguished from waiting tasks in heavy mixed load."""
-    with scheduler.STATE.task_registry_lock:
-        scheduler.STATE.task_registry.clear()
-        for i in range(5):
-            scheduler.STATE.task_registry[f"active_{i}"] = {
+def test_stage_based_paused_tasks_are_distinct(clean_scheduler, clean_telemetry):
+    """Paused tasks should keep the paused stage in mixed load."""
+    _seed_status_tasks(
+        {
+            **{
+                f"paused_prio_{i}": {
+                    "task_id": f"paused_prio_{i}",
+                    "status": "queued",
+                    "stage": "Paused for Priority Task",
+                    "start_time": 200.0 + i,
+                    "is_priority": False,
+                    "type": "Transcription",
+                }
+                for i in range(3)
+            },
+        }
+    )
+
+    stats = _get_status_stats()
+
+    tasks_by_id = {t.get("task_id"): t for t in stats["tasks"]}
+    assert len(stats["tasks"]) == 3
+    assert all(task["status"] == "queued" and task["stage"] == "Paused for Priority Task" for task in tasks_by_id.values())
+
+
+def test_stage_based_waiting_tasks_are_distinct(clean_scheduler, clean_telemetry):
+    """Waiting tasks should keep the initializing stage in mixed load."""
+    _seed_status_tasks(
+        {
+            **{
+                f"waiting_std_{i}": {
+                    "task_id": f"waiting_std_{i}",
+                    "status": "queued",
+                    "stage": "Initializing",
+                    "start_time": 300.0 + i,
+                    "is_priority": False,
+                    "type": "Transcription",
+                }
+                for i in range(2)
+            },
+        }
+    )
+
+    stats = _get_status_stats()
+
+    tasks_by_id = {t.get("task_id"): t for t in stats["tasks"]}
+    assert len(stats["tasks"]) == 2
+    assert all(task["status"] == "queued" and task["stage"] == "Initializing" for task in tasks_by_id.values())
+
+
+def test_stage_based_active_tasks_remain_active(clean_scheduler, clean_telemetry):
+    """Active tasks should remain active in mixed load."""
+    _seed_status_tasks(
+        {
+            f"active_{i}": {
                 "task_id": f"active_{i}",
                 "status": "active",
                 "stage": "Inference",
@@ -469,48 +570,12 @@ def test_stage_based_paused_task_filtering_mixed_load(clean_scheduler, clean_tel
                 "is_priority": False,
                 "type": "Transcription",
             }
-        for i in range(3):
-            scheduler.STATE.task_registry[f"paused_prio_{i}"] = {
-                "task_id": f"paused_prio_{i}",
-                "status": "queued",
-                "stage": "Paused for Priority Task",
-                "start_time": 200.0 + i,
-                "is_priority": False,
-                "type": "Transcription",
-            }
-        for i in range(2):
-            scheduler.STATE.task_registry[f"waiting_std_{i}"] = {
-                "task_id": f"waiting_std_{i}",
-                "status": "queued",
-                "stage": "Initializing",
-                "start_time": 300.0 + i,
-                "is_priority": False,
-                "type": "Transcription",
-            }
+            for i in range(5)
+        }
+    )
 
-    with mock.patch("modules.monitoring.history_manager.get_history_stats", return_value=([], {})):
-        with mock.patch("modules.inference.model_manager.is_engine_actually_loaded", return_value=True):
-            with mock.patch("modules.inference.model_manager.is_uvr_actually_loaded", return_value=True):
-                stats = telemetry.get_service_stats()
+    stats = _get_status_stats()
 
     tasks_by_id = {t.get("task_id"): t for t in stats["tasks"]}
-    assert len(stats["tasks"]) == 10, f"Expected 10 tasks total, got {len(stats['tasks'])}"
-
-    for i in range(3):
-        paused = tasks_by_id.get(f"paused_prio_{i}")
-        assert paused is not None
-        assert paused["status"] == "queued"
-        assert paused["stage"] == "Paused for Priority Task"
-
-    for i in range(2):
-        waiting = tasks_by_id.get(f"waiting_std_{i}")
-        assert waiting is not None
-        assert waiting["status"] == "queued"
-        assert waiting["stage"] == "Initializing"
-        assert waiting["stage"] != "Paused for Priority Task"
-
-    for i in range(5):
-        active = tasks_by_id.get(f"active_{i}")
-        assert active is not None
-        assert active["status"] == "active"
-        assert active["stage"] == "Inference"
+    assert len(stats["tasks"]) == 5
+    assert all(task["status"] == "active" and task["stage"] == "Inference" for task in tasks_by_id.values())

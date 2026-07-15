@@ -28,7 +28,7 @@ Keep Markdown documentation lint-clean and auto-fixable in the same Docker-backe
 
 ## CI / Local Pipeline Integration
 
-- `Dockerfile.test` lint stage must run `npm run lint:md`.
+- The `Dockerfile.test` test image pipeline must run `npm run lint:md`.
 - `tests/run_suite.sh` must run `npm run lint:md` in the Docker test-image path before the frontend quality gates.
 - Local parity scripts must continue using the Dockerfile-based pipeline so Markdown lint runs automatically through the existing build-and-test flow.
 

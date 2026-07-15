@@ -12,7 +12,7 @@ Prevent memory exhaustion and GPU/NPU/RAM leaks by configuring, verifying, and t
 
 | Mode | Environment Config | Description |
 | :--- | :--- | :--- |
-| **Aggressive Offload** | `AGGRESSIVE_OFFLOAD=true` | Immediately purges and unloads models from hardware RAM when active session count reaches 0. |
+| **Aggressive Offload** | `AGGRESSIVE_OFFLOAD=true` | Immediately purges and unloads models from hardware RAM/VRAM when active session count reaches 0. |
 | **Idle Timeout** | `MODEL_IDLE_TIMEOUT=300` | Lazily triggers a deferred `threading.Timer` on session count decrements. If a new request arrives before the timeout, the timer is cancelled and models stay warm. |
 
 *Note*: If `MODEL_IDLE_TIMEOUT > 0`, it takes precedence over `AGGRESSIVE_OFFLOAD`.
@@ -26,7 +26,8 @@ Prevent memory exhaustion and GPU/NPU/RAM leaks by configuring, verifying, and t
 To verify that models are instantly purged when active count hits zero:
 
 - Set up a mock pipeline that decrements standard sessions.
-- Run tests in `tests/inference/test_model_manager.py` and `tests/inference/test_scheduler.py` checking model unload/offload behavior.
+- Run tests in `tests/inference/runtime/test_model_manager.py` and `tests/inference/scheduler/test_scheduler.py` checking model unload/offload behavior.
+- On NVIDIA hosts, verify reclaim logs show both `RAM(RSS)` and `CUDA VRAM` deltas so host-memory vs VRAM reclaim is distinguishable.
 
 ### 2. Test Idle Timeout
 
@@ -45,10 +46,11 @@ The lifecycle operations utilize thread locks to protect model pools from concur
 
 ### 4. Execute Automated Verification
 
-Run unit tests targeting model managers and configurations:
+Run the Docker parity wrapper so the lifecycle tests run through the same container pipeline as CI:
 
 ```bash
-python3 -m pytest tests/inference/test_model_manager.py tests/inference/test_scheduler.py -k "idle_timeout or offload"
+scripts/ci/build-and-test.sh
 ```
 
 Ensure a perfect **10.0/10.0** Pylint score is preserved across modified code blocks.
+

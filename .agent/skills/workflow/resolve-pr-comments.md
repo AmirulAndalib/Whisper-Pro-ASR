@@ -209,7 +209,7 @@ COMMENT_BODY="Your fix description"
 # ... (make code changes)
 
 # 2. Run affected tests
-pytest tests/inference/test_scheduler.py -v
+pytest tests/inference/scheduler/test_scheduler.py -v
 pytest -v --cov=modules --cov-threshold=90
 
 # 3. Verify coverage maintained
@@ -604,3 +604,4 @@ git push
 - [ ] Mergeable status confirmed
 - [ ] Ready for merge
 ```
+

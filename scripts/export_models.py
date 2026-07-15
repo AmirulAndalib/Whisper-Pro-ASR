@@ -1,20 +1,23 @@
+import json
+import logging
 import os
+import shutil
+import subprocess
 import sys
 import types
-import torch
-import shutil
-import logging
-import json
-import subprocess
 from pathlib import Path
+
+import torch
 
 # Shim for legacy libraries that expect torchaudio.backend (removed in 2.1+)
 # Must be applied BEFORE importing libraries that might depend on it (like demucs)
 import torchaudio
+
 if not hasattr(torchaudio, "backend"):
     # Create or get backend
     try:
         import torchaudio._backend as _backend
+
         backend_obj = _backend
     except ImportError:
         backend_obj = types.ModuleType("torchaudio.backend")
@@ -38,7 +41,7 @@ if not hasattr(torchaudio, "backend"):
 
 import urllib.request
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("model_exporter")
 
 MODELS_DIR = Path("/models")
@@ -51,12 +54,17 @@ def export_whisper(model_name):
     out_dir = MODELS_DIR / "whisper-openvino"
 
     cmd = [
-        "optimum-cli", "export", "openvino",
-        "--model", model_name,
-        "--task", "automatic-speech-recognition",
-        "--weight-format", "int8",
+        "optimum-cli",
+        "export",
+        "openvino",
+        "--model",
+        model_name,
+        "--task",
+        "automatic-speech-recognition",
+        "--weight-format",
+        "int8",
         "--sym",
-        str(out_dir)
+        str(out_dir),
     ]
 
     try:
@@ -78,11 +86,7 @@ def warmup_uvr():
     model_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        separator = Separator(
-            model_file_dir=str(model_dir),
-            output_dir="/tmp",
-            output_format="WAV"
-        )
+        separator = Separator(model_file_dir=str(model_dir), output_dir="/tmp", output_format="WAV")
 
         # This will download the .ckpt and export to .onnx if needed
         model_name = os.environ.get("VOCAL_SEPARATION_MODEL", "UVR-MDX-NET-Inst_HQ_3.onnx")

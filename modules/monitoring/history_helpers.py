@@ -1,0 +1,183 @@
+"""Helper functions for history and analytics processing."""
+
+import ntpath
+import os
+from typing import Any, Dict, Optional
+
+
+def backfill_task_filenames(data: Any) -> None:
+    """Helper to resolve and clean generic task filenames in a flat list of history tasks."""
+    if not isinstance(data, list):
+        return
+    for task in data:
+        backfill_single_task_filename(task)
+
+
+def backfill_single_task_filename(task: Any) -> None:
+    """Resolve and clean a single task filename if generic."""
+    if not isinstance(task, dict):
+        return
+    req_json = _get_request_json_dict(task)
+    best_name = _extract_best_filename(req_json)
+    if is_generic_filename(task.get("filename")) and best_name:
+        task["filename"] = best_name
+
+
+def _get_request_json_dict(task: dict) -> dict:
+    req_json = task.get("request_json") or {}
+    return req_json if isinstance(req_json, dict) else {}
+
+
+def _extract_best_filename(req_json: dict) -> Optional[str]:
+    candidates = [
+        req_json.get("video_file"),
+        req_json.get("local_path"),
+        req_json.get("file_path"),
+        req_json.get("original_path"),
+        req_json.get("file"),
+        req_json.get("audio_file"),
+    ]
+    for val in candidates:
+        base = _clean_candidate_filename(val)
+        if base:
+            return base
+    return None
+
+
+def _clean_candidate_filename(value: Any) -> Optional[str]:
+    if not (value and isinstance(value, str) and value.strip()):
+        return None
+    clean_val = value.strip().strip('"').strip("'")
+    base = ntpath.basename(clean_val)
+    return None if is_generic_filename(base) else base
+
+
+def is_generic_filename(value: Optional[str]) -> bool:
+    """Check if a filename is generic or placeholder."""
+    return value in [None, "", "audio_file", "file", "blob", "Unknown", "Unknown Media"]
+
+
+def merge_legacy_analytics(old_cache: Dict[str, Any], new_cache: Dict[str, Any]) -> None:
+    """Helper to merge legacy cache items that aren't in history anymore."""
+    for date_str, daily_data in old_cache.items():
+        _merge_single_legacy_day(date_str, daily_data, new_cache)
+
+
+def _merge_single_legacy_day(date_str: str, daily_data: Any, new_cache: Dict[str, Any]) -> None:
+    if not isinstance(daily_data, dict):
+        return
+    if date_str in new_cache:
+        _merge_overlapping_legacy_day(daily_data, new_cache[date_str])
+        return
+    if _has_all_category_keys(daily_data):
+        new_cache[date_str] = daily_data
+        return
+    new_cache[date_str] = _backfill_legacy_day_as_asr(daily_data)
+
+
+def _has_all_category_keys(daily_data: dict) -> bool:
+    return all(cat in daily_data for cat in ["asr", "detectlang", "audio"])
+
+
+def _merge_overlapping_legacy_day(old_day: dict, rebuilt_day: dict) -> None:
+    old_count = old_day.get("count", 0)
+    old_dur = old_day.get("duration", 0.0)
+    rebuilt_count = rebuilt_day.get("count", 0)
+    rebuilt_dur = rebuilt_day.get("duration", 0.0)
+
+    diff_count = max(0, old_count - rebuilt_count)
+    diff_dur = max(0.0, old_dur - rebuilt_dur)
+
+    rebuilt_day["count"] = max(old_count, rebuilt_count)
+    rebuilt_day["duration"] = max(old_dur, rebuilt_dur)
+    if "asr" not in rebuilt_day:
+        rebuilt_day["asr"] = {"count": 0, "duration": 0.0}
+    rebuilt_day["asr"]["count"] += diff_count
+    rebuilt_day["asr"]["duration"] += diff_dur
+
+
+def _backfill_legacy_day_as_asr(daily_data: dict) -> dict:
+    day = dict(daily_data)
+    day["asr"] = {"count": day.get("count", 0), "duration": day.get("duration", 0.0)}
+    day["detectlang"] = {"count": 0, "duration": 0.0}
+    day["audio"] = {"count": 0, "duration": 0.0}
+    return day
+
+
+def new_stats_payload() -> Dict[str, Any]:
+    """Return a clean default history stats dictionary payload."""
+    return {
+        "all_time": 0.0,
+        "today": 0.0,
+        "this_month": 0.0,
+        "this_year": 0.0,
+        "count_all_time": 0,
+        "count_today": 0,
+        "asr": {"count": 0, "duration": 0.0},
+        "detectlang": {"count": 0, "duration": 0.0},
+        "audio": {"count": 0, "duration": 0.0},
+    }
+
+
+def accumulate_stats(stats: Dict[str, Any], analytics_snapshot: Dict[str, Any], today_str: str, month_str: str, year_str: str) -> None:
+    """Accumulate total duration and counts from daily analytics snapshot into stats dict."""
+    for date_str, daily_data in analytics_snapshot.items():
+        if not isinstance(daily_data, dict):
+            continue
+        _accumulate_daily_totals(
+            stats,
+            date_str,
+            daily_data,
+            today_str=today_str,
+            month_str=month_str,
+            year_str=year_str,
+        )
+        _accumulate_daily_categories(stats, daily_data)
+
+
+def _accumulate_daily_totals(
+    stats: Dict[str, Any],
+    date_str: str,
+    daily_data: Dict[str, Any],
+    *,
+    today_str: str,
+    month_str: str,
+    year_str: str,
+) -> None:
+    duration = daily_data.get("duration", 0.0)
+    count = daily_data.get("count", 0)
+    stats["all_time"] += duration
+    stats["count_all_time"] += count
+    if date_str == today_str:
+        stats["today"] += duration
+        stats["count_today"] += count
+    if date_str.startswith(month_str):
+        stats["this_month"] += duration
+    if date_str.startswith(year_str):
+        stats["this_year"] += duration
+
+
+def _accumulate_daily_categories(stats: Dict[str, Any], daily_data: Dict[str, Any]) -> None:
+    for cat in ["asr", "detectlang", "audio"]:
+        cat_data = daily_data.get(cat, {})
+        stats[cat]["count"] += cat_data.get("count", 0)
+        stats[cat]["duration"] += cat_data.get("duration", 0.0)
+
+
+def iter_unique_legacy_paths(candidates: list[str], current_file: str):
+    """Yield unique normalized legacy file candidates excluding current file path."""
+    current_abs = os.path.abspath(current_file)
+    seen = set()
+    for candidate in candidates:
+        candidate_abs = normalize_legacy_candidate(candidate)
+        if not candidate_abs or candidate_abs == current_abs or candidate_abs in seen:
+            continue
+        seen.add(candidate_abs)
+        yield candidate_abs
+
+
+def normalize_legacy_candidate(candidate: str) -> Optional[str]:
+    """Normalize a legacy path candidate to absolute path when valid."""
+    if not candidate:
+        return None
+    return os.path.abspath(candidate)

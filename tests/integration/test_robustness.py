@@ -9,9 +9,11 @@ import tempfile
 from collections import namedtuple
 from unittest import mock
 
-from modules.api import routes_system
+from modules.api.routes import system as routes_system
 from modules.core import bootstrap, config, utils
-from modules.inference import language_detection, model_manager, scheduler
+from modules.inference import scheduler
+from modules.inference.pipeline import language_detection
+from modules.inference.runtime import model_manager
 from modules.monitoring import dashboard_ui, metrics_discovery
 
 
@@ -82,65 +84,142 @@ def test_hardware_path_resolution():
         bootstrap.initialize_hardware_path()
 
 
-def test_media_utilities_resilience():
-    """Target gaps in media utilities and formatting logic."""
-    # 1. clear_gpu_cache exception path
+def test_hardware_path_resolution_prefers_intel_for_npu_preprocess():
+    """Bootstrap should activate Intel ORT path when preprocess device targets NPU."""
+
+    class PathTracker(list):
+        """Minimal sys.path stand-in that records insert calls."""
+
+        def __init__(self):
+            super().__init__()
+            self.insert_calls = []
+
+        def insert(self, index, value):
+            self.insert_calls.append((index, value))
+            super().insert(index, value)
+
+    with mock.patch.dict(os.environ, {"ASR_DEVICE": "CPU", "ASR_PREPROCESS_DEVICE": "NPU"}):
+        with mock.patch("os.path.exists", side_effect=lambda path: path == "/app/libs/intel"):
+            fake_path = PathTracker()
+            with mock.patch.object(sys, "path", fake_path):
+                with mock.patch("openvino.Core", side_effect=RuntimeError("probe failed")):
+                    with mock.patch("importlib.reload"):
+                        bootstrap.initialize_hardware_path()
+                        assert (0, "/app/libs/intel") in fake_path.insert_calls
+
+
+def test_hardware_path_resolution_uses_cpu_runtime_path_when_no_accelerator_selected():
+    """Bootstrap should route ONNX loading through deterministic CPU runtime path by default."""
+
+    class PathTracker(list):
+        """Minimal sys.path stand-in that records insert calls."""
+
+        def __init__(self):
+            super().__init__()
+            self.insert_calls = []
+
+        def insert(self, index, value):
+            self.insert_calls.append((index, value))
+            super().insert(index, value)
+
+    with mock.patch.dict(os.environ, {"ASR_DEVICE": "CPU", "ASR_PREPROCESS_DEVICE": "CPU"}):
+        with mock.patch("os.path.exists", side_effect=lambda path: path == "/app/libs/cpu"):
+            fake_path = PathTracker()
+            with mock.patch.object(sys, "path", fake_path):
+                with mock.patch("importlib.reload"):
+                    bootstrap.initialize_hardware_path()
+                    assert (0, "/app/libs/cpu") in fake_path.insert_calls
+
+
+def test_hardware_path_resolution_uses_nvidia_runtime_when_ctranslate2_detects_cuda():
+    """Bootstrap should route ONNX loading through NVIDIA runtime when CTranslate2 detects CUDA."""
+
+    class PathTracker(list):
+        """Minimal sys.path stand-in that records insert calls."""
+
+        def __init__(self):
+            super().__init__()
+            self.insert_calls = []
+
+        def insert(self, index, value):
+            self.insert_calls.append((index, value))
+            super().insert(index, value)
+
+    with mock.patch.dict(os.environ, {"ASR_DEVICE": "AUTO", "ASR_PREPROCESS_DEVICE": "AUTO"}):
+        with mock.patch(
+            "os.path.exists",
+            side_effect=lambda path: path in ["/app/libs/nvidia", "/app/libs/cpu"],
+        ):
+            mock_ct2 = mock.MagicMock()
+            mock_ct2.get_cuda_device_count.return_value = 1
+            fake_path = PathTracker()
+            with mock.patch.object(sys, "path", fake_path):
+                with mock.patch("modules.core.bootstrap._detect_intel_hardware", return_value=False):
+                    with mock.patch("importlib.import_module", return_value=mock_ct2):
+                        with mock.patch("importlib.reload"):
+                            bootstrap.initialize_hardware_path()
+                            assert (0, "/app/libs/nvidia") in fake_path.insert_calls
+
+
+def test_media_clear_gpu_cache_and_progress_parsing():
+    """Target the GPU cache and FFmpeg progress error paths."""
     with mock.patch("modules.core.utils.torch") as mock_torch:
         mock_torch.cuda.is_available.return_value = True
         mock_torch.cuda.empty_cache.side_effect = Exception("CUDA Fail")
         utils.clear_gpu_cache()
 
-    # 2. FFmpeg progress parsing failures and speed parsing
     process = mock.MagicMock()
     process.stdout.readline.side_effect = ["out_time_ms=invalid\n", "speed= 1.25x\n", ""]
-    speed = utils.parse_ffmpeg_progress(process, 10.0)
-    assert speed == "1.25x"
+    assert utils.parse_ffmpeg_progress(process, 10.0) == "1.25x"
 
-    # 3. Subtitle generation fallbacks
+
+def test_media_subtitle_generation_fallbacks():
+    """Target subtitle generation fallback cases."""
     res_text = {"text": "hello"}
-    assert "00:00:00,000" in utils.generate_srt(res_text)
-    assert "[No dialogue detected]" in utils.generate_srt({})
-    assert "[No dialogue detected]" in utils.generate_srt({"text": ""})
-
     res_none = {"segments": [{"text": "hello", "start": None, "end": None}]}
-    assert "00:00:00,000" in utils.generate_srt(res_none)
-
-    assert "WEBVTT" in utils.generate_vtt(res_text)
-    assert "[No dialogue detected]" in utils.generate_vtt({})
-    assert "[No dialogue detected]" in utils.generate_vtt({"text": ""})
-
     res_vtt_none = {"segments": [{"text": "hello", "start": None, "end": None}]}
-    assert "00:00:00.000" in utils.generate_vtt(res_vtt_none)
 
-    assert "start\tend\ttext" == utils.generate_tsv({})
-    assert "" == utils.generate_txt({})
+    assert (
+        "00:00:00,000" in utils.generate_srt(res_text),
+        "[No dialogue detected]" in utils.generate_srt({}),
+        "[No dialogue detected]" in utils.generate_srt({"text": ""}),
+        "00:00:00,000" in utils.generate_srt(res_none),
+        "WEBVTT" in utils.generate_vtt(res_text),
+        "[No dialogue detected]" in utils.generate_vtt({}),
+        "[No dialogue detected]" in utils.generate_vtt({"text": ""}),
+        "00:00:00.000" in utils.generate_vtt(res_vtt_none),
+        utils.generate_tsv({}) == "start\tend\ttext",
+        utils.generate_txt({}) == "",
+    ) == (True, True, True, True, True, True, True, True, True, True)
 
-    # 4. Filesystem operations resilience
+
+def test_media_filesystem_and_purging_resilience():
+    """Target filesystem cleanup and temporary asset purging failures."""
     utils.secure_remove("")
     with mock.patch("os.path.exists", return_value=True):
         with mock.patch("os.remove", side_effect=Exception("Remove Fail")):
             utils.secure_remove("dummy.path")
 
-    # 5. Cleanup routine error handling
     with mock.patch("os.path.exists", return_value=True):
         with mock.patch("os.walk", return_value=[("/tmp", [], ["old.tmp"])]):
             with mock.patch("os.path.getmtime", return_value=0):
                 with mock.patch("os.remove", side_effect=Exception("Prune Fail")):
                     utils.cleanup_old_files("/tmp", days=1)
 
-    # 6. Temporary asset purging
     temp_dir = tempfile.mkdtemp()
     try:
         os.makedirs(os.path.join(temp_dir, "preprocessing"))
-        with mock.patch.dict(os.environ, {"WHISPER_TEMP_DIR": temp_dir}):
+        with mock.patch("modules.core.utils_helpers.config.get_temp_dir", return_value=temp_dir):
             utils.purge_temporary_assets()
         with mock.patch("os.listdir", side_effect=OSError("List Fail")):
-            with mock.patch.dict(os.environ, {"WHISPER_TEMP_DIR": temp_dir}):
+            with mock.patch("modules.core.utils_helpers.config.get_temp_dir", return_value=temp_dir):
                 utils.purge_temporary_assets()
     finally:
         shutil.rmtree(temp_dir)
 
-    # 7. Media validation failures
+
+def test_media_validation_helpers():
+    """Target media validation helper fallbacks."""
     assert utils.convert_to_wav(None) is None
     with mock.patch("os.path.exists", return_value=True):
         with mock.patch("os.path.getsize", return_value=0):
@@ -149,22 +228,23 @@ def test_media_utilities_resilience():
     assert utils.get_pretty_model_name(None) == "Unknown Engine"
 
 
-def test_engine_resource_management():
-    """Test model management and hardware locking edge cases."""
-    # 1. Language detection fallback paths
+def test_engine_resource_language_detection_fallbacks():
+    """Target language detection fallback paths."""
     model = mock.MagicMock()
     model.detect_language.return_value = ("en", 0.9, [("en", 0.9)])
     audio = mock.MagicMock()
     audio.astype.return_value = audio
-    res = model_manager.run_language_detection_core(model, audio, skip_vad=True)
-    assert res["language"] == "en"
 
+    first = model_manager.run_language_detection_core(model, audio, skip_vad=True)
     model.detect_language.side_effect = Exception("Detect Fail")
     model.transcribe.return_value = ([], mock.MagicMock(language="en", language_probability=0.8, all_language_probs=[]))
-    res = model_manager.run_language_detection_core(model, audio, skip_vad=True)
-    assert res["language"] == "en"
+    second = model_manager.run_language_detection_core(model, audio, skip_vad=True)
 
-    # 2. Aggressive offload and reclamation failures
+    assert (first["language"], second["language"]) == ("en", "en")
+
+
+def test_engine_resource_unload_and_cleanup_failures():
+    """Target unload failure paths and cleanup fallbacks."""
     model_mock = mock.MagicMock()
     model_mock_2 = mock.MagicMock(spec=["pipeline"])
     pm_mock = mock.MagicMock()
@@ -176,28 +256,28 @@ def test_engine_resource_management():
 
     mock_ct2 = mock.MagicMock()
     mock_ct2.clear_caches.side_effect = RuntimeError("CT2 Fail")
-    with mock.patch.dict("modules.inference.model_manager._ENGINES", {"ctranslate2": mock_ct2}):
+    with mock.patch.dict("modules.inference.runtime.model_manager._ENGINES", {"ctranslate2": mock_ct2}):
+        with mock.patch("modules.core.utils.get_system_telemetry", return_value={}):
+            model_manager.unload_models()
+
+    with mock.patch("ctypes.CDLL", side_effect=OSError("No libc")):
         with mock.patch("modules.core.utils.get_system_telemetry", return_value={}):
             model_manager.unload_models()
 
     assert len(model_manager.MODEL_POOL) == 0
 
-    # 3. Libc/Platform specific reclamation failures
-    with mock.patch("ctypes.CDLL", side_effect=OSError("No libc")):
-        with mock.patch("modules.core.utils.get_system_telemetry", return_value={}):
-            model_manager.unload_models()
 
-    # 4. Scheduler metadata updates for untracked threads
+def test_engine_resource_status_helpers():
+    """Target scheduler metadata and engine state helpers."""
     with mock.patch("threading.get_ident", return_value=999999):
         scheduler.update_task_metadata(foo="bar")
-    scheduler.STATE.preemptible_units.clear()
-    assert scheduler.get_preemptible_unit() is None
 
-    # 5. Status helpers
+    scheduler.STATE.preemptible_units.clear()
     model_manager.MODEL_POOL = {"CPU": mock.MagicMock()}
-    assert model_manager.is_engine_actually_loaded() is True
+    loaded_true = model_manager.is_engine_actually_loaded()
     model_manager.MODEL_POOL = {}
-    assert model_manager.is_engine_actually_loaded() is False
+
+    assert (scheduler.get_preemptible_unit(), loaded_true, model_manager.is_engine_actually_loaded()) == (None, True, False)
 
 
 def test_hardware_monitoring_fallbacks():
@@ -205,7 +285,7 @@ def test_hardware_monitoring_fallbacks():
     with metrics_discovery.CACHE_LOCK:
         metrics_discovery.METRIC_CACHE.clear()
 
-    with mock.patch("subprocess.check_output", side_effect=FileNotFoundError("No tool")):
+    with mock.patch("modules.core.process_exec.check_output_text", side_effect=FileNotFoundError("No tool")):
         assert metrics_discovery.get_npu_load() == 0
         assert metrics_discovery.get_intel_gpu_load() == 0
         assert metrics_discovery.get_nvidia_metrics() == []
@@ -240,7 +320,7 @@ def test_system_routes_logic_gaps():
         assert "<html>" in resp.body.decode()
 
     # 2. download_logs fail paths
-    with mock.patch("modules.api.routes_system.config") as mock_conf:
+    with mock.patch("modules.api.routes.system.config") as mock_conf:
         mock_conf.LOG_DIR = "/non/existent"
         mock_conf.TEMP_DIR = "/non/existent/temp"
         with mock.patch("os.path.exists", return_value=False):
@@ -257,7 +337,7 @@ def test_system_routes_logic_gaps():
     }
 
     with mock.patch("modules.core.config.update_env"):
-        with mock.patch("modules.inference.model_manager.load_model"):
+        with mock.patch("modules.inference.runtime.model_manager.load_model"):
             resp = asyncio.run(routes_system.update_settings(mock_post_request))
             assert resp["status"] == "success"
 

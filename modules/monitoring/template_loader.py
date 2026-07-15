@@ -11,11 +11,7 @@ def read_text_file(file_path: str) -> str:
 
 def read_manifest_lines(file_path: str) -> list[str]:
     """Read newline-delimited manifest entries, ignoring blanks and comments."""
-    return [
-        line.strip()
-        for line in read_text_file(file_path).splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    ]
+    return [line.strip() for line in read_text_file(file_path).splitlines() if line.strip() and not line.lstrip().startswith("#")]
 
 
 def load_page_html_and_css(base_dir: str, template_name: str, css_name: str) -> tuple[str, str]:

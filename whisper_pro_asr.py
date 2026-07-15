@@ -1,4 +1,3 @@
-# ruff: noqa: I001
 """
 Whisper Pro ASR - Enterprise Transcription Service
 Main entry point for the Whisper Pro ASR FastAPI application.
@@ -9,27 +8,29 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
+from typing import AsyncGenerator, Awaitable, Callable
 
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-# CRITICAL: Bootstrap hardware path before ANY other first-party imports
-from modules.core import bootstrap
+from modules.api.routes import asr as routes_asr
+from modules.api.routes import detect as routes_detect
+from modules.api.routes import system as routes_system
 
-from modules.api import routes_asr, routes_detect, routes_system
-from modules.core import config, logging_setup, utils
-from modules.inference import model_manager
+# CRITICAL: Bootstrap hardware path before ANY other first-party imports
+from modules.core import bootstrap, config, logging_setup, utils
+from modules.inference.runtime import model_manager
 
 # Initialize global logger
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
-async def lifespan(fastapi_app: FastAPI):
+async def lifespan(fastapi_app: FastAPI) -> AsyncGenerator[FastAPI, None]:
     """Manage application startup and shutdown lifecycle hooks."""
     model_manager.init_pool()
 
@@ -42,7 +43,7 @@ async def lifespan(fastapi_app: FastAPI):
     # Cleanup on shutdown if needed
 
 
-def create_app(testing=False):
+def create_app(testing: bool = False) -> FastAPI:
     """Enterprise FastAPI Factory."""
     logging_setup.setup_logging()
     logging_setup.log_banner()
@@ -74,7 +75,7 @@ def create_app(testing=False):
 
     # Configure Request Lifecycle Logging & Storage Hygiene Middleware
     @fastapi_app.middleware("http")
-    async def request_lifecycle_middleware(request: Request, call_next):
+    async def request_lifecycle_middleware(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
         request.state.start_time = time.time()
         client_ip = request.headers.get("X-Forwarded-For", request.client.host if request.client else "127.0.0.1")
         content_length = request.headers.get("content-length", "0")
@@ -112,7 +113,7 @@ def create_app(testing=False):
 
     # Custom Swagger Endpoint for themed documentation
     @fastapi_app.get("/docs", include_in_schema=False)
-    async def custom_swagger_ui_html():
+    async def custom_swagger_ui_html() -> HTMLResponse:
         swagger_js = (
             "/static/swagger-ui-bundle.js"
             if os.path.exists("static/swagger-ui-bundle.js")
@@ -123,20 +124,16 @@ def create_app(testing=False):
             if os.path.exists("static/swagger-ui.css")
             else "https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css"
         )
-        swagger_fav = (
-            "/static/favicon.png"
-            if os.path.exists("static/favicon.png")
-            else "https://fastapi.tiangolo.com/img/favicon.png"
-        )
+        swagger_fav = "/static/favicon.png" if os.path.exists("static/favicon.png") else "https://fastapi.tiangolo.com/img/favicon.png"
 
         res = get_swagger_ui_html(
-            openapi_url=fastapi_app.openapi_url,
+            openapi_url=fastapi_app.openapi_url or "",
             title=fastapi_app.title + " - Swagger UI",
             swagger_js_url=swagger_js,
             swagger_css_url=swagger_css,
             swagger_favicon_url=swagger_fav,
         )
-        html = res.body.decode("utf-8")
+        html = bytes(res.body).decode("utf-8")
         if os.path.exists("static/swagger-theme.css"):
             theme_link = '<link rel="stylesheet" type="text/css" href="/static/swagger-theme.css">'
             html = html.replace("</head>", f"  {theme_link}\n</head>")
@@ -150,7 +147,7 @@ def create_app(testing=False):
     return fastapi_app
 
 
-def verify_runtime_integrity():
+def verify_runtime_integrity() -> None:
     """Safety check for critical AI backends."""
     try:
         ort = importlib.import_module("onnxruntime")
@@ -163,4 +160,4 @@ app = create_app()
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=9000, log_config=None)
+    uvicorn.run(app, host=config.HOST, port=9000, log_config=None)

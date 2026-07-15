@@ -1,10 +1,18 @@
 # Document Update Skill
 
-This skill automates the process of synchronizing all project documentation with the current state of the codebase.
+This skill automates synchronization of repository documentation with the current codebase and release state.
 
 ## Objective
 
-Review the whole current commit for documentation drift, then update `README.md`, all files in `docs/`, and all Mermaid diagrams in `.md` files to reflect recent architectural changes including Speaker Diarization (WhisperX), ASR parameter customization, Model Idle Timeout, and Subtitle Layout Customization.
+Review the full current change set for documentation drift, then update `README.md`, affected files in `docs/`, and impacted Mermaid diagrams in `.md` files so they match implemented behavior.
+
+When frontend dashboard/analytics assets change, documentation must describe:
+
+- Manifest-driven script assembly (`dashboard_js_files.txt`, `analytics_js_files.txt`).
+- Current folder structure under `modules/monitoring/templates/dashboard/` and `modules/monitoring/templates/analytics/`.
+- Any updated quality-gate commands and prerequisites (for example Playwright browser install requirements).
+
+When release-impacting behavior is changed, add or update a file in `docs/releases/` describing the delta and verification outcomes.
 
 Also enforce the Concurrency-First policy: concurrency correctness must be reflected consistently across user docs and agent governance docs.
 Also enforce endpoint taxonomy consistency: `/asr` and `/v1/audio/...` are one standard ASR class; `/detect-language` and `/detectlang` are one priority language-ID class.
@@ -31,49 +39,43 @@ Before editing docs, inspect the full current commit diff so documentation and r
 
 ### 1. Update Mermaid Diagrams
 
-Locate and update Mermaid diagrams in all project `.md` files to match the current architecture, including the diarization post-processing pipeline and idle timeout monitor thread.
+Locate and update Mermaid diagrams in all project `.md` files to match the current architecture, scheduler semantics, and monitoring pipelines.
 
 ### 2. Update `README.md`
 
-- Highlight the new **Speaker Diarization** feature (WhisperX alignment, diarization, speaker assignment).
-- Document new ASR parameters: `initial_prompt`, `vad_filter`, `word_timestamps`, `diarize`, `min_speakers`, `max_speakers`, `hf_token`.
-- Document subtitle customization: `max_line_width`, `max_line_count`.
-- Update Configuration Reference with `HF_TOKEN`, `MODEL_IDLE_TIMEOUT`, and `INITIAL_PROMPT` environment variables.
-- Update the **Hardware Orchestration** section to mention re-entrant locking.
-- Update the **Language Detection** section to describe the new global VAD + batch inference flow.
+- Keep feature and architecture sections aligned with current behavior.
+- Keep dashboard/analytics template tree and file references aligned with current JS/CSS/HTML layout.
+- Keep quality-gate command snippets current with actual scripts and prerequisites.
 
 ### 3. Update `docs/ARCHITECTURE.md`
 
-- Deep dive into the `model_lock_ctx` re-entrancy implementation.
-- Describe the `run_batch_language_detection` optimization.
-- Document the WhisperX diarization pipeline stages and caching pools (`_ALIGN_POOL`, `_DIARIZE_POOL`).
-- Document the `_monitor_idleness()` background thread and `MODEL_IDLE_TIMEOUT` lifecycle.
+- Keep concurrency, pipeline, and model lifecycle details synchronized with implementation.
+- Keep monitoring/dashboard architecture details synchronized, including modular template and manifest loading behavior.
 
 ### 4. Update `docs/CONCURRENCY.md`
 
-- Explain how priority requests and re-entrant locks prevent deadlocks in high-load scenarios.
-- Document Model Idle Timeout as an alternative to `AGGRESSIVE_OFFLOAD`.
+- Ensure lock ordering, preemption, and bounded progress policies match implementation and tests.
 
 ### 5. Update `docs/API.md`
 
-- Ensure the `/detect-language` and `/asr` endpoint documentation matches current status codes (400 for media errors) and the unified 16kHz WAV pipeline.
-- Document new `/asr` parameters: `diarize`, `min_speakers`, `max_speakers`, `hf_token`, `initial_prompt`, `vad_filter`, `word_timestamps`, `max_line_width`, `max_line_count`.
-- Document output formats include speaker labels when diarization is enabled.
+- Ensure endpoint classes, request/response semantics, and parameter tables remain aligned with implementation.
 
 ### 6. Update `docs/DOCKERHUB_DESCRIPTION.md`
 
-- Synchronize with README updates (Speaker Diarization, new config vars, new features).
+- Synchronize feature and operation wording with README and current runtime behavior.
 
 ### 7. Update `docs/SETUP.md`
 
-- Document `HF_TOKEN` requirement for speaker diarization.
-- Add volume mapping guidance for persistent diarization model cache.
+- Keep setup and prerequisite steps aligned with current runtime and frontend tooling needs.
 
 ### 8. Update `docs/TUNING.md`
 
-- Document `MODEL_IDLE_TIMEOUT` as an alternative to `AGGRESSIVE_OFFLOAD` for memory management.
-- Document `INITIAL_PROMPT` for guiding transcription context.
+- Keep tuning guidance aligned with current knobs and operational recommendations.
 
-### 9. Hardware Compatibility Matrix
+### 9. Release Notes Synchronization
+
+Create or update the corresponding file under `docs/releases/` whenever behavior, architecture, testing strategy, or quality-gate outcomes materially change.
+
+### 10. Hardware Compatibility Matrix
 
 Ensure a **Hardware Compatibility Matrix** is present and updated in `README.md`, `docs/ARCHITECTURE.md`, and `docs/DOCKERHUB_DESCRIPTION.md`. The matrix must accurately reflect current backend support for Vocal Separation, ASR Inference, and Speaker Diarization across CPU, NVIDIA, and Intel architectures.

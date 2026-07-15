@@ -16,11 +16,10 @@ class TestConfig:
 
     def test_default_model_value(self):
         """Test that DEFAULT_MODEL is set correctly."""
-        # Default model for Faster-Whisper
-        assert (
-            "faster-whisper" in config_module.DEFAULT_WHISPER.lower()
-            or "whisper" in config_module.DEFAULT_WHISPER.lower()
-        )
+        assert config_module.DEFAULT_WHISPER in {
+            "Systran/faster-whisper-large-v3",
+            "openai/whisper-large-v3",
+        }
 
     def test_model_id_from_env(self):
         """Test MODEL_ID reads from environment."""
@@ -95,15 +94,16 @@ class TestConfigEnv:
 
     def test_ov_cache_dir_from_env(self):
         """Test OV_CACHE_DIR can be set via env."""
-        with mock.patch.dict(os.environ, {"OV_CACHE_DIR": "/custom/cache"}):
+        custom_cache = os.path.join(tempfile.gettempdir(), "custom_cache")
+        with mock.patch.dict(os.environ, {"OV_CACHE_DIR": custom_cache}):
             importlib.reload(config_module)
 
-            assert config_module.OV_CACHE_DIR == "/custom/cache"
+            assert config_module.OV_CACHE_DIR == custom_cache
 
     def test_app_constants(self):
         """Test app name and version constants."""
         assert "Whisper" in config_module.APP_NAME
-        assert config_module.VERSION == "1.1.5"
+        assert config_module.VERSION == "1.1.6"
 
     def test_device_constant_exists(self):
         """Test DEVICE constant exists."""
@@ -197,6 +197,7 @@ class TestConfigHardware:
                     # NPU detected and selected as primary AUTO device when CUDA is absent.
                     assert config_module.DEVICE == "NPU"
                     assert config_module.PREPROCESS_DEVICE == "NPU"
+                    assert any(u.get("id") == "NPU" for u in config_module.HARDWARE_UNITS if u.get("type") == "NPU")
 
     def test_hardware_detection_logic_gpu_amd(self):
         """Test AMD/Intel GPU detection path (OpenVINO GPU)."""
@@ -509,20 +510,25 @@ class TestConfigSSD:
         }
 
         def mock_makedirs(path, *_args, **_kwargs):
-            if any(
-                fail_path in str(path) for fail_path in ["/fail_temp", "/fail_persist", "/fail_state", "/fail_cache"]
-            ):
+            if any(fail_path in str(path) for fail_path in ["/fail_temp", "/fail_persist", "/fail_state", "/fail_cache"]):
                 raise PermissionError("Permission denied")
 
         with mock.patch.dict(os.environ, env):
             with mock.patch("os.makedirs", side_effect=mock_makedirs):
                 importlib.reload(config_module)
-                # Verify TEMP_DIR, PERSISTENT_DIR, STATE_DIR, LOG_DIR fallbacks
-                assert config_module.TEMP_DIR == tempfile.gettempdir()
-                assert config_module.PERSISTENT_DIR == "./test_data"
-                assert config_module.STATE_DIR == "./test_state"
-                assert config_module.LOG_DIR == "./test_state"
-                assert config_module.PERSISTENT_TEMP_DIR == tempfile.gettempdir()
+                assert (
+                    config_module.TEMP_DIR,
+                    config_module.PERSISTENT_DIR,
+                    config_module.STATE_DIR,
+                    config_module.LOG_DIR,
+                    config_module.PERSISTENT_TEMP_DIR,
+                ) == (
+                    tempfile.gettempdir(),
+                    os.path.join(tempfile.gettempdir(), "whisper-runtime", "state"),
+                    "./test_state",
+                    "./test_state",
+                    "./model_cache/temp",
+                )
 
     def test_validate_thread_concurrency_error(self):
         """Test exception handling in validate_thread_concurrency."""
@@ -584,9 +590,5 @@ shm /dev/shm tmpfs rw,nosuid,nodev,noexec,relatime,size=65536k 0 0
             mock.patch("builtins.open", mock.mock_open(read_data=fake_mounts)),
         ):
             mounts = config_module.get_custom_mount_points()
-            assert "/tv" in mounts
-            assert "/movies" in mounts
-            # System mount points and subdir mount points like /dev/shm should be filtered out
-            assert "/sys" not in mounts
-            assert "/proc" not in mounts
-            assert "/dev/shm" not in mounts
+            assert {"/tv", "/movies"}.issubset(set(mounts))
+            assert {"/sys", "/proc", "/dev/shm"}.isdisjoint(set(mounts))

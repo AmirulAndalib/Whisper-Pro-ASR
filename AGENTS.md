@@ -14,6 +14,7 @@
 - **Frontend Security Gate (Mandatory)**: CI and local build parity scripts must fail on any npm audit vulnerability using `npm audit --audit-level=low` after `npm ci`.
 - **Build Script Bootstrap (Mandatory)**: `scripts/ci/build-and-test.sh` and `scripts/ci/build-and-test.ps1` are allowed to bootstrap missing `npm`/`docker` dependencies on Linux via `apt-get`, but must fail clearly when automatic installation is unavailable.
 - **Playwright + MCP Tooling (Mandatory)**: For frontend and dashboard verification, use Playwright CLI commands (`npx playwright ...` or npm scripts wrapping Playwright CLI) and MCP browser tooling for DOM/state inspection and deterministic troubleshooting. Do not rely on ad-hoc browser/manual-only verification paths when these automated tools are available.
+- **Docker-Only Quality Execution**: All linting, formatting, schema validation, type checking, dependency auditing, security scanning, and testing MUST be executed exclusively within the Docker test image pipeline (`Dockerfile.test` target `test`). Host-side executions of these quality gates are forbidden; the local/CI wrappers (`build-and-test.sh` and `build-and-test.ps1`) must only build and run the Docker test image and consume its results.
 
 ## Task & Status Display Priority (Mandatory)
 
@@ -27,7 +28,7 @@ Any change to scheduling, preemption, or monitoring MUST preserve correctness an
 - **No Placeholder Display Values (Hard Rule)**: Dashboard-visible status/stage output must never expose placeholder-like values (`unknown`, `none`, `null`, `undefined`, `(0/0)`, `resuming`, or any sentinel placeholder text). If internal state is undefined, normalize it to a concrete canonical runtime label before API payload/rendering.
 - **Preemption Visibility**: Paused tasks MUST display as `status='queued'` + stage containing 'Paused for Priority Task'. This distinction allows dashboard to show "Paused for priority" vs "Waiting for hardware" hints correctly.
 - **Order Determinism**: Task rendering order MUST be deterministic (active-first, then arrival/start_time based) independent of map iteration or async fetch order. Validate via `test_task_ordering_*` regression tests in `tests/monitoring/`.
-- **Frontend Alignment**: After any status/stage change, run `npm run test:js` and verify dashboard_main.js test coverage remains ≥90% lines/statements (branches/functions pragmatic per `quality/frontend_quality_gates_skill.md`).
+- **Frontend Alignment**: After any status/stage change, run `npm run test:js` and verify dashboard feature script coverage remains ≥90% lines/statements for critical status-rendering modules (`dashboard/features/runtime.js`, `dashboard/features/speed_status.js`; branches/functions pragmatic per `quality/frontend_quality_gates_skill.md`).
 
 ### Change Impact Triggers
 
@@ -63,8 +64,8 @@ Any change to scheduling, preemption, or monitoring MUST preserve correctness an
 ## Speaker Diarization
 
 - **WhisperX Pipeline**: Speaker diarization uses `whisperx` (alignment → diarization → speaker assignment). The pipeline caches alignment and diarization models in `_ALIGN_POOL` and `_DIARIZE_POOL` per hardware unit.
-- **HF_TOKEN Requirement**: Diarization requires a valid Hugging Face token (`HF_TOKEN` environment variable) for access to PyAnnote speaker segmentation models.
-- **Graceful Fallback**: If diarization fails or `HF_TOKEN` is missing, the system must fall back to standard transcription without speaker labels.
+- **DIARIZATION_HF_TOKEN Requirement**: Diarization requires a valid Hugging Face token (`DIARIZATION_HF_TOKEN` environment variable) for access to PyAnnote speaker segmentation models.
+- **Graceful Fallback**: If diarization fails or `DIARIZATION_HF_TOKEN` is missing, the system must fall back to standard transcription without speaker labels.
 
 ## ASR Parameters
 
@@ -81,3 +82,4 @@ Any change to scheduling, preemption, or monitoring MUST preserve correctness an
 
 - Follow PEP 8 and use type hints.
 - Maintain high test coverage (min 90%).
+- Enforce a maximum cyclomatic complexity score of A (Radon rank A, complexity <= 5) for all Python functions, methods, and blocks.

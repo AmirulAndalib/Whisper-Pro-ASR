@@ -19,7 +19,7 @@ All core runtime modules are consolidated under `modules/core/` for improved org
 | Component | Responsibility |
 | :--- | :--- |
 | `modules/core/bootstrap.py` | Hardware path patching and library redirection. Ensures correct hardware-optimized libraries are injected into `sys.path` before any AI modules are imported. |
-| `modules/core/config.py` | Centralized hardware detection (CUDA/NPU/iGPU), unit pool initialization, and feature flags (`HF_TOKEN`, `MODEL_IDLE_TIMEOUT`, `INITIAL_PROMPT`). |
+| `modules/core/config.py` | Centralized hardware detection (CUDA/NPU/iGPU), unit pool initialization, and feature flags (`DIARIZATION_HF_TOKEN`, `MODEL_IDLE_TIMEOUT`, `INITIAL_PROMPT`). |
 | `modules/core/logging_setup.py` | Orchestrates hardware banners and thread-local context filtering. |
 | `modules/core/constants.py` | Static constants such as `HALLUCINATION_PHRASES` used across the codebase. |
 | `modules/core/utils.py` | Managed FFmpeg normalization, **16kHz WAV Standardization**, subtitle generation with `wrap_text()` layout control, speaker label formatting, and cross-platform utilities. |
@@ -29,9 +29,9 @@ All core runtime modules are consolidated under `modules/core/` for improved org
 
 | Component | Responsibility |
 | :--- | :--- |
-| `modules/inference/` | Core logic for `model_manager` (transcription, diarization, idle monitoring), `scheduler` (re-entrant locks), `preprocessing` (UVR), `vad`, `language_detection` (batch language ID pipeline), `engine_factory` (backend selection), `intel_engine`, `diarization`, and `post_processing`. |
-| `modules/api/` | FastAPI application layer: `routes_asr` (transcription), `routes_detect` (language detection), `routes_system` (dashboard, settings, analytics, history), and `routes_utils` (shared request utilities, file upload handling, cleanup). |
-| `modules/monitoring/` | `dashboard` & `dashboard_ui` (Material Design UI renderer utilizing modular `templates/` CSS/JS components), `analytics_ui` (analytics dashboard dynamically loaded from modular `templates/` assets), `telemetry` & `telemetry_manager` (persistent telemetry history), `history_manager` (task history with dual-tier storage), and `metrics_discovery` (hardware metrics). |
+| `modules/inference/` | Inference stack grouped by concern: `runtime/` (`model_manager`, `concurrency`, segment consumption), `scheduler/` (re-entrant locks, state/order/task helpers), `pipeline/` (`preprocessing/` package with orchestrator in `__init__.py` plus `helpers.py`, `provider.py`, `execution.py`, alongside `vad`, `language_detection`, `diarization`, `post_processing`), and `engines/` (`base`, `engine_factory`, `faster_whisper_engine`, `openai_whisper_engine`, `whisperx_engine`, `intel_engine`). |
+| `modules/api/` | FastAPI application layer grouped by concern: `routes/` (`asr`, `detect`, `system`) and `support/` (`request_utils`, `upload_extraction`, `local_path`) for shared request/materialization/path-approval logic. |
+| `modules/monitoring/` | `dashboard` & `dashboard_ui` (Material Design UI renderer loading manifest-ordered modules from `templates/dashboard_js_files.txt`), `analytics_ui` (analytics dashboard loaded from `templates/analytics_js_files.txt`), `telemetry` & `telemetry_manager` (persistent telemetry history), `history_manager` (task history with dual-tier storage), and `metrics_discovery` (hardware metrics). |
 
 ### 🧩 Hardware Compatibility Matrix
 
@@ -90,7 +90,7 @@ graph TD
 ```mermaid
 graph LR
     SEG["Raw Segments"] --> ALIGN["whisperx.align()"]
-    ALIGN --> DIAR["DiarizationPipeline (HF_TOKEN)"]
+    ALIGN --> DIAR["DiarizationPipeline (DIARIZATION_HF_TOKEN)"]
     DIAR --> ASSIGN["assign_word_speakers()"]
     ASSIGN --> LABELED["Speaker-Labeled Segments"]
     
@@ -189,9 +189,10 @@ The system features a thread-aware logging and telemetry engine designed for ind
 - **Thread-Isolated Buffers**: Utilizing a custom `TaskLogFilter`, logs are redirected to a thread-local buffer (`TASK_LOGS`) in real-time. This allows the dashboard to display execution logs specific to an active task without inter-thread noise.
 - **Real-Time Synchronization**: The log download endpoint features a mandatory flush-to-disk sequence and zero-caching headers, ensuring diagnostics are always current.
 - **Telemetry Downsampling**: A dual-layer downsampling strategy caps telemetry data at 300 points for dashboard chart rendering. Server-side downsampling in `telemetry.py` reduces payloads before transmission, while client-side downsampling in `dashboard_ui.py` provides an additional safety net for chart performance.
-- **Service Analytics**: The `/analytics` endpoint and dedicated analytics UI (`analytics_ui.py`) provide cumulative and daily breakdowns of task counts, durations, and usage patterns separated by HTTP endpoint surface (`/asr`, `/detect-language`/`/detectlang`, and `/v1/audio/...`) from persistent task history. The analytics dashboard is dynamically composed of modular HTML, CSS, and JS components under `templates/`.
-- **Industrial Quality Standard**: The entire ecosystem is maintained with a strict **10.00/10 Pylint score**, strict **Ruff static analysis and formatting compliance**, strict **Flake8 compliance** (`max-line-length=140`, no ignore directives), and **>90% test coverage** across all modules and tests, representing a zero-regression baseline for enterprise deployments.
-- **Incremental Dashboard Updates**: The monitoring UI utilizes an incremental DOM update pattern to maintain scroll positions in log buffers and live streams while polling the `/status` endpoint every 2 seconds. The HTML dashboard UI is structured as a collection of modular CSS and JS components loaded from `modules/monitoring/templates/`.
+- **Hardware Utilization Probes**: `metrics_discovery.py` assembles per-unit utilization for CUDA, Intel GPU, and Intel NPU. CUDA uses `nvidia-smi` as the primary source and falls back to activity inference when direct telemetry is unavailable. Intel GPU and NPU probe in strict order: native Linux device counters, then Windows performance counters, and only then task/activity inference. The dashboard consumes the resulting `telemetry.hardware_util` map keyed by unit id, with legacy fields kept only for compatibility.
+- **Service Analytics**: The `/analytics` endpoint and dedicated analytics UI (`analytics_ui.py`) provide cumulative and daily breakdowns of task counts, durations, and usage patterns separated by HTTP endpoint surface (`/asr`, `/detect-language`/`/detectlang`, and `/v1/audio/...`) from persistent task history. The analytics dashboard composes modular HTML/CSS plus foldered JS under `modules/monitoring/templates/analytics/`, loaded in deterministic order from `templates/analytics_js_files.txt`.
+- **Industrial Quality Standard**: The entire ecosystem is maintained with a strict **10.00/10 Pylint score**, strict **Ruff static analysis and formatting compliance** at `140` columns, strict **Flake8 compliance** (`max-line-length=140`, no ignore directives), and **>90% test coverage** across all modules and tests, representing a zero-regression baseline for enterprise deployments.
+- **Incremental Dashboard Updates**: The monitoring UI utilizes an incremental DOM update pattern to maintain scroll positions in log buffers and live streams while polling the `/status` endpoint every 2 seconds. Dashboard JS is split across `modules/monitoring/templates/dashboard/core/`, `modules/monitoring/templates/dashboard/features/`, plus the orchestration entrypoint `modules/monitoring/templates/dashboard/main.js`, and concatenated in deterministic manifest order from `templates/dashboard_js_files.txt`.
 - **O(1) Live Subtitle Updates**: Appends pre-formatted subtitle blocks incrementally to the live SRT display stream during processing instead of doing full $O(N^2)$ stream reconstructions, preventing performance bottlenecks and memory bloat on large media files.
 
 ### 5. Long-Movie Processing & Audio Chunking

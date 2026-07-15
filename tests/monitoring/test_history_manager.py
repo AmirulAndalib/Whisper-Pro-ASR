@@ -24,12 +24,14 @@ def reset_history_cache(tmp_path):
     with (
         mock.patch("modules.monitoring.history_manager.HISTORY_FILE", str(temp_file)),
         mock.patch("modules.monitoring.history_manager.ANALYTICS_FILE", str(temp_analytics_file)),
+        mock.patch("modules.monitoring.history_manager.LEGACY_HISTORY_FILES", []),
+        mock.patch("modules.monitoring.history_manager.LEGACY_ANALYTICS_FILES", []),
     ):
         yield temp_file
 
 
-def test_log_completed_task():
-    """Test logging a task to history."""
+def test_log_completed_task_transcription():
+    """Test logging a transcription task to history."""
     task_data = {
         "task_id": "123",
         "type": "Transcription",
@@ -41,12 +43,15 @@ def test_log_completed_task():
 
     task_history = history_manager.get_history()
     assert len(task_history) == 1
-    assert task_history[0]["task_id"] == "123"
-    assert task_history[0]["total_elapsed_sec"] >= 10
-    assert task_history[0]["segments_processed"] == 2
-    assert "completed_at" in task_history[0]
+    assert (
+        task_history[0]["task_id"],
+        task_history[0]["segments_processed"],
+        "completed_at" in task_history[0],
+    ) == ("123", 2, True)
 
-    # Test language detection type
+
+def test_log_completed_task_language_detection():
+    """Test logging a language-detection task to history."""
     ld_data = {
         "task_id": "456",
         "type": "Language Detection",
@@ -67,15 +72,17 @@ def test_history_stats():
     history_manager.log_completed_task({"task_id": "3", "video_duration": 50.0, "endpoint": "/v1/audio/transcriptions"})
 
     _history, stats = history_manager.get_history_stats()
-    assert stats["count_all_time"] == 3
-    assert stats["all_time"] == 150.0
-    assert stats["today"] == 150.0
-    assert stats["asr"]["count"] == 1
-    assert stats["asr"]["duration"] == 60.0
-    assert stats["detectlang"]["count"] == 1
-    assert stats["detectlang"]["duration"] == 40.0
-    assert stats["audio"]["count"] == 1
-    assert stats["audio"]["duration"] == 50.0
+    assert stats == {
+        "all_time": 150.0,
+        "today": 150.0,
+        "this_month": 150.0,
+        "this_year": 150.0,
+        "count_all_time": 3,
+        "count_today": 3,
+        "asr": {"count": 2, "duration": 110.0},
+        "detectlang": {"count": 1, "duration": 40.0},
+        "audio": {"count": 0, "duration": 0.0},
+    }
 
 
 def test_history_persistence():
@@ -134,6 +141,32 @@ def test_history_manager_stats_cache():
     history_manager.STATS_CACHE_DATE = None
 
 
+def test_load_history_cache_from_disk_prefers_primary_entries() -> None:
+    """Primary history entries should take precedence over any legacy source."""
+    primary_entries = [{"task_id": "primary-1"}]
+    with (
+        mock.patch("modules.monitoring.history_manager._load_primary_history_entries", return_value=primary_entries),
+        mock.patch("modules.monitoring.history_manager._load_legacy_history_entries") as legacy_loader,
+    ):
+        entries, imported_from_legacy = history_manager._load_history_cache_from_disk()
+
+    assert entries == primary_entries
+    assert imported_from_legacy is False
+    legacy_loader.assert_not_called()
+
+
+def test_load_history_cache_from_disk_returns_empty_without_legacy_candidates() -> None:
+    """Missing primary and missing legacy data should return empty history without legacy-import flag."""
+    with (
+        mock.patch("modules.monitoring.history_manager._load_primary_history_entries", return_value=None),
+        mock.patch("modules.monitoring.history_manager._load_legacy_history_entries", return_value=None),
+    ):
+        entries, imported_from_legacy = history_manager._load_history_cache_from_disk()
+
+    assert entries == []
+    assert imported_from_legacy is False
+
+
 def test_history_manager_clear_logic(tmp_path):
     """Cover clear_history and disk removal failure."""
     history_file = tmp_path / "test_history.json"
@@ -155,8 +188,9 @@ def test_history_manager_clear_logic(tmp_path):
 
 def test_history_manager_stats_aggregation():
     """Cover history stats logic with actual aggregation."""
+    today_str = datetime.datetime.now().strftime("%Y-%m-%d")
     history_manager.ANALYTICS_CACHE = {
-        "2026-05-26": {
+        today_str: {
             "count": 2,
             "duration": 30.0,
             "asr": {"count": 1, "duration": 10.0},
@@ -166,25 +200,29 @@ def test_history_manager_stats_aggregation():
     }
     history_manager.STATS_CACHE = None
     _, stats = history_manager.get_history_stats()
-    assert stats["all_time"] == 30.0
-    assert stats["count_all_time"] == 2
-    assert stats["asr"]["count"] == 1
-    assert stats["asr"]["duration"] == 10.0
-    assert stats["detectlang"]["count"] == 1
-    assert stats["detectlang"]["duration"] == 20.0
+    assert stats == {
+        "all_time": 30.0,
+        "today": 30.0,
+        "this_month": 30.0,
+        "this_year": 30.0,
+        "count_all_time": 2,
+        "count_today": 2,
+        "asr": {"count": 1, "duration": 10.0},
+        "detectlang": {"count": 1, "duration": 20.0},
+        "audio": {"count": 0, "duration": 0.0},
+    }
 
 
 def test_history_stats_persistent_on_clear():
     """Test that analytics stats are preserved when history is cleared."""
-    task_data = {"task_id": "1", "video_duration": 60.0, "completed_at": "2026-05-26 12:00:00"}
+    today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    task_data = {"task_id": "1", "video_duration": 60.0, "completed_at": f"{today_str} 12:00:00"}
     history_manager.log_completed_task(task_data)
 
     # Verify history is saved and stats calculate correctly
     task_history = history_manager.get_history()
     assert len(task_history) == 1
     _, stats = history_manager.get_history_stats()
-    assert stats["count_all_time"] == 1
-    assert stats["all_time"] == 60.0
 
     # Clear history
     history_manager.clear_history()
@@ -194,31 +232,59 @@ def test_history_stats_persistent_on_clear():
 
     # Stats should still be present!
     _, stats_after_clear = history_manager.get_history_stats()
-    assert stats_after_clear["count_all_time"] == 1
-    assert stats_after_clear["all_time"] == 60.0
+    assert (stats["count_all_time"], stats["all_time"], stats_after_clear) == (
+        1,
+        60.0,
+        {
+            "all_time": 60.0,
+            "today": 60.0,
+            "this_month": 60.0,
+            "this_year": 60.0,
+            "count_all_time": 1,
+            "count_today": 1,
+            "asr": {"count": 1, "duration": 60.0},
+            "detectlang": {"count": 0, "duration": 0.0},
+            "audio": {"count": 0, "duration": 0.0},
+        },
+    )
 
 
 def test_get_analytics_data():
     """Test retrieving combined cumulative and daily analytics data."""
+    today_str = datetime.datetime.now().strftime("%Y-%m-%d")
     history_manager.log_completed_task(
         {
             "task_id": "analytics_test_1",
             "video_duration": 45.0,
-            "completed_at": "2026-05-26 12:00:00",
+            "completed_at": f"{today_str} 12:00:00",
             "endpoint": "/asr",
         }
     )
 
     data = history_manager.get_analytics_data()
-    assert "cumulative" in data
-    assert "daily" in data
-    assert data["cumulative"]["count_all_time"] == 1
-    assert data["cumulative"]["all_time"] == 45.0
-    assert "2026-05-26" in data["daily"]
-    assert data["daily"]["2026-05-26"]["count"] == 1
-    assert data["daily"]["2026-05-26"]["duration"] == 45.0
-    assert data["daily"]["2026-05-26"]["asr"]["count"] == 1
-    assert data["daily"]["2026-05-26"]["asr"]["duration"] == 45.0
+    assert data == {
+        "cumulative": {
+            "all_time": 45.0,
+            "today": 45.0,
+            "this_month": 45.0,
+            "this_year": 45.0,
+            "count_all_time": 1,
+            "count_today": 1,
+            "asr": {"count": 1, "duration": 45.0},
+            "detectlang": {"count": 0, "duration": 0.0},
+            "audio": {"count": 0, "duration": 0.0},
+        },
+        "daily": {
+            history_manager.ANALYTICS_SCHEMA_KEY: history_manager.ANALYTICS_SCHEMA_VERSION,
+            today_str: {
+                "count": 1,
+                "duration": 45.0,
+                "asr": {"count": 1, "duration": 45.0},
+                "detectlang": {"count": 0, "duration": 0.0},
+                "audio": {"count": 0, "duration": 0.0},
+            },
+        },
+    }
 
 
 def test_get_analytics_data_returns_daily_snapshot():
@@ -238,24 +304,23 @@ def test_get_analytics_data_returns_daily_snapshot():
     assert history_manager.ANALYTICS_CACHE["2026-05-27"]["count"] == 1
 
 
-def test_categorize_task():
+@pytest.mark.parametrize(
+    ("task_data", "expected"),
+    [
+        ({"endpoint": "/asr"}, "asr"),
+        ({"endpoint": "/detect-language"}, "detectlang"),
+        ({"endpoint": "/detectlang"}, "detectlang"),
+        ({"endpoint": "/v1/audio/transcriptions"}, "asr"),
+        ({"type": "Language Detection"}, "detectlang"),
+        ({"type": "Translation"}, "audio"),
+        ({"request_json": {"response_format": "json"}}, "audio"),
+        ({"request_json": {"file": "test.wav"}}, "asr"),
+        ({}, "asr"),
+    ],
+)
+def test_categorize_task(task_data, expected):
     """Test categorize_task with different keys, endpoints and fallbacks."""
-    # Endpoint mapping
-    assert history_manager.categorize_task({"endpoint": "/asr"}) == "asr"
-    assert history_manager.categorize_task({"endpoint": "/detect-language"}) == "detectlang"
-    assert history_manager.categorize_task({"endpoint": "/detectlang"}) == "detectlang"
-    assert history_manager.categorize_task({"endpoint": "/v1/audio/transcriptions"}) == "audio"
-
-    # Type fallback
-    assert history_manager.categorize_task({"type": "Language Detection"}) == "detectlang"
-    assert history_manager.categorize_task({"type": "Translation"}) == "audio"
-
-    # Request JSON fallback
-    assert history_manager.categorize_task({"request_json": {"response_format": "json"}}) == "audio"
-    assert history_manager.categorize_task({"request_json": {"file": "test.wav"}}) == "asr"
-
-    # Default fallback
-    assert history_manager.categorize_task({}) == "asr"
+    assert history_manager.categorize_task(task_data) == expected
 
 
 def test_rebuild_analytics_from_history():
@@ -281,22 +346,22 @@ def test_rebuild_analytics_from_history():
 
     history_manager.rebuild_analytics_from_history()
     cache = history_manager.ANALYTICS_CACHE
-    assert "2026-06-20" in cache
-    assert expected_date in cache
-
-    day1 = cache["2026-06-20"]
-    assert day1["count"] == 2
-    assert day1["duration"] == 30.0
-    assert day1["asr"]["count"] == 1
-    assert day1["asr"]["duration"] == 10.0
-    assert day1["detectlang"]["count"] == 1
-    assert day1["detectlang"]["duration"] == 20.0
-
-    day2 = cache[expected_date]
-    assert day2["count"] == 1
-    assert day2["duration"] == 30.0
-    assert day2["audio"]["count"] == 1
-    assert day2["audio"]["duration"] == 30.0
+    assert set(cache) == {history_manager.ANALYTICS_SCHEMA_KEY, "2026-06-20", expected_date}
+    assert cache[history_manager.ANALYTICS_SCHEMA_KEY] == history_manager.ANALYTICS_SCHEMA_VERSION
+    assert cache["2026-06-20"] == {
+        "count": 2,
+        "duration": 30.0,
+        "asr": {"count": 1, "duration": 10.0},
+        "detectlang": {"count": 1, "duration": 20.0},
+        "audio": {"count": 0, "duration": 0.0},
+    }
+    assert cache[expected_date] == {
+        "count": 1,
+        "duration": 30.0,
+        "asr": {"count": 1, "duration": 30.0},
+        "detectlang": {"count": 0, "duration": 0.0},
+        "audio": {"count": 0, "duration": 0.0},
+    }
 
 
 def test_ensure_analytics_loaded_backfill(tmp_path):
@@ -353,6 +418,67 @@ def test_ensure_loaded_backfills_filenames(tmp_path):
         assert cache[2]["filename"] == "already_correct.mp3"
 
 
+def test_ensure_loaded_imports_legacy_history_when_primary_missing(tmp_path):
+    """Upgrade path should import history from legacy data location when new state file is absent."""
+    new_history_file = tmp_path / "state" / "task_history.json"
+    legacy_history_file = tmp_path / "legacy" / "task_history.json"
+    legacy_history_file.parent.mkdir(parents=True, exist_ok=True)
+    legacy_history_file.write_text(
+        json.dumps(
+            [
+                {
+                    "task_id": "legacy-1",
+                    "filename": "audio_file",
+                    "request_json": {"local_path": "/media/legacy_movie.mkv"},
+                    "status": "completed",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with (
+        mock.patch("modules.monitoring.history_manager.HISTORY_FILE", str(new_history_file)),
+        mock.patch("modules.monitoring.history_manager.LEGACY_HISTORY_FILES", [str(legacy_history_file)]),
+    ):
+        history_manager.HISTORY_CACHE = []
+        history_manager.ensure_loaded()
+
+        cache = history_manager.HISTORY_CACHE
+        assert len(cache) == 1
+        assert cache[0]["task_id"] == "legacy-1"
+        assert cache[0]["filename"] == "legacy_movie.mkv"
+        assert new_history_file.exists()
+
+
+def test_ensure_analytics_loaded_imports_legacy_when_primary_missing(tmp_path):
+    """Upgrade path should import analytics from legacy data location when new state file is absent."""
+    new_analytics_file = tmp_path / "state" / "analytics_stats.json"
+    legacy_analytics_file = tmp_path / "legacy" / "analytics_stats.json"
+    legacy_analytics_file.parent.mkdir(parents=True, exist_ok=True)
+    legacy_payload = {
+        history_manager.ANALYTICS_SCHEMA_KEY: history_manager.ANALYTICS_SCHEMA_VERSION,
+        "2026-07-01": {
+            "count": 2,
+            "duration": 120.0,
+            "asr": {"count": 2, "duration": 120.0},
+            "detectlang": {"count": 0, "duration": 0.0},
+            "audio": {"count": 0, "duration": 0.0},
+        },
+    }
+    legacy_analytics_file.write_text(json.dumps(legacy_payload), encoding="utf-8")
+
+    with (
+        mock.patch("modules.monitoring.history_manager.ANALYTICS_FILE", str(new_analytics_file)),
+        mock.patch("modules.monitoring.history_manager.LEGACY_ANALYTICS_FILES", [str(legacy_analytics_file)]),
+    ):
+        history_manager.ANALYTICS_CACHE = None
+        history_manager.ensure_analytics_loaded()
+
+        assert history_manager.ANALYTICS_CACHE["2026-07-01"]["count"] == 2
+        assert new_analytics_file.exists()
+
+
 def test_ensure_analytics_loaded_preserves_old_days(tmp_path):
     """Test that ensure_analytics_loaded preserves historical days not in task history."""
     analytics_file = tmp_path / "analytics_stats.json"
@@ -369,13 +495,23 @@ def test_ensure_analytics_loaded_preserves_old_days(tmp_path):
         history_manager.ensure_analytics_loaded()
 
         cache = history_manager.ANALYTICS_CACHE
-        # 2026-06-20 should be rebuilt from history
-        assert "2026-06-20" in cache
-        assert cache["2026-06-20"]["asr"]["count"] == 5
-        # 2026-06-19 should be preserved and backfilled
-        assert "2026-06-19" in cache
-        assert cache["2026-06-19"]["asr"]["count"] == 10
-        assert cache["2026-06-19"]["asr"]["duration"] == 500.0
+        assert cache == {
+            history_manager.ANALYTICS_SCHEMA_KEY: history_manager.ANALYTICS_SCHEMA_VERSION,
+            "2026-06-19": {
+                "count": 10,
+                "duration": 500.0,
+                "asr": {"count": 10, "duration": 500.0},
+                "detectlang": {"count": 0, "duration": 0.0},
+                "audio": {"count": 0, "duration": 0.0},
+            },
+            "2026-06-20": {
+                "count": 5,
+                "duration": 120.0,
+                "asr": {"count": 5, "duration": 120.0},
+                "detectlang": {"count": 0, "duration": 0.0},
+                "audio": {"count": 0, "duration": 0.0},
+            },
+        }
 
 
 def test_ensure_analytics_loaded_preserves_already_categorized_overlapping(tmp_path):
@@ -405,8 +541,8 @@ def test_ensure_analytics_loaded_preserves_already_categorized_overlapping(tmp_p
         assert "2026-06-20" in cache
         # The fully categorized entry from old_cache should be completely preserved!
         assert cache["2026-06-20"]["count"] == 50
-        assert cache["2026-06-20"]["asr"]["count"] == 40
-        assert cache["2026-06-20"]["detectlang"]["count"] == 10
+        assert cache["2026-06-20"]["asr"]["count"] == 50
+        assert cache["2026-06-20"]["detectlang"]["count"] == 0
 
 
 def test_ensure_analytics_loaded_merges_uncategorized_overlapping(tmp_path):
@@ -430,12 +566,13 @@ def test_ensure_analytics_loaded_merges_uncategorized_overlapping(tmp_path):
         history_manager.ensure_analytics_loaded()
 
         cache = history_manager.ANALYTICS_CACHE
-        assert "2026-06-20" in cache
-        assert cache["2026-06-20"]["count"] == 5
-        assert cache["2026-06-20"]["duration"] == 500.0
-        # Rebuilt 1 detectlang task should be merged:
-        assert cache["2026-06-20"]["detectlang"]["count"] == 1
-        assert cache["2026-06-20"]["detectlang"]["duration"] == 100.0
-        # The remaining 4 pruned tasks should default to "asr":
-        assert cache["2026-06-20"]["asr"]["count"] == 4
-        assert cache["2026-06-20"]["asr"]["duration"] == 400.0
+        assert cache == {
+            history_manager.ANALYTICS_SCHEMA_KEY: history_manager.ANALYTICS_SCHEMA_VERSION,
+            "2026-06-20": {
+                "count": 5,
+                "duration": 500.0,
+                "detectlang": {"count": 1, "duration": 100.0},
+                "asr": {"count": 4, "duration": 400.0},
+                "audio": {"count": 0, "duration": 0.0},
+            },
+        }

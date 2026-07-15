@@ -9,7 +9,10 @@ module.exports = defineConfig({
       provider: "v8",
       reportsDirectory: "coverage-js",
       reporter: ["text", "lcov"],
-      include: ["modules/monitoring/templates/*.js"],
+      include: [
+        "modules/monitoring/templates/dashboard/**/*.js",
+        "modules/monitoring/templates/analytics/**/*.js",
+      ],
       thresholds: {
         perFile: true,
         lines: 90,

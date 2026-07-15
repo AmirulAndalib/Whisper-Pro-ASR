@@ -17,6 +17,20 @@ from modules.core.logging_setup import (
 )
 
 
+def _logged_messages(mock_logger: mock.MagicMock) -> str:
+    messages = []
+    for call in mock_logger.info.call_args_list:
+        args = call[0]
+        if len(args) > 1:
+            try:
+                messages.append(args[0] % args[1:])
+            except TypeError:
+                messages.append(str(args[0]))
+        else:
+            messages.append(str(args[0]))
+    return "\n".join(messages)
+
+
 class TestIgnoreSpecificWarnings:
     """Test suite for IgnoreSpecificWarnings filter."""
 
@@ -29,9 +43,7 @@ class TestIgnoreSpecificWarnings:
 
     def _create_record(self, message):
         """Helper to create a log record with a message."""
-        record = logging.LogRecord(
-            name="test", level=logging.WARNING, pathname="test.py", lineno=1, msg=message, args=(), exc_info=None
-        )
+        record = logging.LogRecord(name="test", level=logging.WARNING, pathname="test.py", lineno=1, msg=message, args=(), exc_info=None)
         return record
 
     def test_filter_allows_normal_messages(self):
@@ -107,21 +119,7 @@ class TestLogBanner:
         with mock.patch("modules.core.logging_setup.logger") as mock_logger:
             log_banner()
 
-            # Collect all logged messages, handle lazy formatting
-            logged_messages = []
-            for call in mock_logger.info.call_args_list:
-                args = call[0]
-                if len(args) > 1:
-                    # Basic reconstruction for test purposes
-                    try:
-                        logged_messages.append(args[0] % args[1:])
-                    except TypeError:
-                        logged_messages.append(str(args[0]))
-                else:
-                    logged_messages.append(str(args[0]))
-            full_log = "\n".join(logged_messages)
-
-            assert "Whisper Pro ASR" in full_log
+            assert "Whisper Pro ASR" in _logged_messages(mock_logger)
 
     def test_log_banner_model_locally_found(self):
         """Test banner shows 'Locally Found' when model exists."""
@@ -132,19 +130,7 @@ class TestLogBanner:
                 with mock.patch("modules.core.logging_setup.logger") as mock_logger:
                     log_banner()
 
-                    logged_messages = []
-                    for call in mock_logger.info.call_args_list:
-                        args = call[0]
-                        if len(args) > 1:
-                            try:
-                                logged_messages.append(args[0] % args[1:])
-                            except TypeError:
-                                logged_messages.append(str(args[0]))
-                        else:
-                            logged_messages.append(str(args[0]))
-                    full_log = "\n".join(logged_messages)
-
-                    assert "Locally Found" in full_log
+                    assert "Locally Found" in _logged_messages(mock_logger)
 
     def test_log_banner_model_hugging_face(self):
         """Test banner shows 'Hugging Face' when model not local."""
@@ -153,45 +139,28 @@ class TestLogBanner:
             with mock.patch("modules.core.logging_setup.logger") as mock_logger:
                 log_banner()
 
-                logged_messages = []
-                for call in mock_logger.info.call_args_list:
-                    args = call[0]
-                    if len(args) > 1:
-                        try:
-                            logged_messages.append(args[0] % args[1:])
-                        except TypeError:
-                            logged_messages.append(str(args[0]))
-                    else:
-                        logged_messages.append(str(args[0]))
-                full_log = "\n".join(logged_messages)
-
-                assert "Hugging Face" in full_log
+                assert "Hugging Face" in _logged_messages(mock_logger)
 
     def test_log_banner_shows_configuration(self):
         """Test banner shows configuration section."""
         with mock.patch("modules.core.logging_setup.logger") as mock_logger:
             log_banner()
 
-            logged_messages = []
-            for call in mock_logger.info.call_args_list:
-                args = call[0]
-                if len(args) > 1:
-                    try:
-                        logged_messages.append(args[0] % args[1:])
-                    except TypeError:
-                        logged_messages.append(str(args[0]))
-                else:
-                    logged_messages.append(str(args[0]))
-            full_log = "\n".join(logged_messages)
+            full_log = _logged_messages(mock_logger)
 
-            assert "[ENGINE CONFIG]" in full_log
-            assert "Whisper Model ID" in full_log
-            assert "Vocal Separator Model ID" in full_log
-            assert "[HARDWARE INFO]" in full_log
-            assert "Pipeline target" in full_log
-            assert "ASR Runtime" in full_log
-            assert "Preprocess Device" in full_log
-            assert "Beam Size" in full_log
+            assert all(
+                token in full_log
+                for token in [
+                    "[ENGINE CONFIG]",
+                    "Whisper Model ID",
+                    "Vocal Separator Model ID",
+                    "[HARDWARE INFO]",
+                    "Pipeline target",
+                    "ASR Runtime",
+                    "Preprocess Device",
+                    "Beam Size",
+                ]
+            )
 
     def test_log_banner_shows_thread_info(self):
         """Test banner shows thread configuration."""
@@ -214,21 +183,9 @@ class TestLogBanner:
             with mock.patch("modules.core.logging_setup.logger") as mock_logger:
                 log_banner()
 
-                logged_messages = []
-                for call in mock_logger.info.call_args_list:
-                    args = call[0]
-                    if len(args) > 1:
-                        try:
-                            logged_messages.append(args[0] % args[1:])
-                        except TypeError:
-                            logged_messages.append(str(args[0]))
-                    else:
-                        logged_messages.append(str(args[0]))
-                full_log = "\n".join(logged_messages)
+                full_log = _logged_messages(mock_logger)
 
-                assert "ASR=4" in full_log
-                assert "Preprocess=8" in full_log
-                assert "FFmpeg=2" in full_log
+                assert all(token in full_log for token in ["ASR=4", "Preprocess=8", "FFmpeg=2"])
 
 
 class TestGetDeviceProperties:
@@ -381,22 +338,34 @@ class TestGetDeviceProperties:
                 mock_conf.FFMPEG_THREADS = 2
                 mock_conf.ENABLE_VOCAL_SEPARATION = True
 
-                log_banner()
+                with mock.patch.dict(
+                    os.environ,
+                    {
+                        "INTEL_OPENVINO_DIR": "/opt/intel/openvino",
+                        "LD_LIBRARY_PATH": "/opt/intel/openvino/runtime/lib/intel64",
+                        "LIBVA_DRIVER_NAME": "iHD",
+                        "ONEAPI_DEVICE_SELECTOR": "level_zero:gpu",
+                        "ZE_AFFINITY_MASK": "0",
+                        "OCL_ICD_VENDORS": "/etc/OpenCL/vendors",
+                    },
+                    clear=False,
+                ):
+                    with mock.patch("importlib.import_module") as mock_import_module:
+                        mock_core = mock.MagicMock()
+                        mock_core.available_devices = ["GPU.0", "NPU.0", "CPU"]
+                        mock_core.get_property.return_value = "Intel(R) AI Boost"
+                        mock_ov = mock.MagicMock()
+                        mock_ov.Core.return_value = mock_core
+                        mock_import_module.return_value = mock_ov
 
-                logged_messages = []
-                for call in mock_logger.info.call_args_list:
-                    args = call[0]
-                    if len(args) > 1:
-                        try:
-                            logged_messages.append(args[0] % args[1:])
-                        except TypeError:
-                            logged_messages.append(str(args[0]))
-                    else:
-                        logged_messages.append(str(args[0]))
-                full_log = "\n".join(logged_messages)
+                        log_banner()
 
-                assert "[HARDWARE INFO]" in full_log
-                assert "NPU" in full_log
+                full_log = _logged_messages(mock_logger)
+
+                assert all(token in full_log for token in ["[HARDWARE INFO]", "NPU"])
+                assert "INTEL RUNTIME ENV" in full_log
+                assert "LIBVA_DRIVER_NAME" in full_log
+                assert "OpenVINO devices" in full_log
 
     def test_log_level_info_by_default(self):
         """Test that log level is INFO when DEBUG is false."""

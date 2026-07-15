@@ -1,6 +1,5 @@
 # Avoid sending these into Docker build context
 .git
-.github
 .agent
 .continue
 .cursor
@@ -16,6 +15,7 @@ htmlcov
 __pycache__
 *.pyc
 .venv
+.venv_bak
 venv
 env
 node_modules
@@ -23,3 +23,9 @@ model_cache
 models
 temp_audio
 media
+data
+state
+reports
+test-results
+coverage-js
+.buildx-cache

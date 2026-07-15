@@ -1,0 +1,80 @@
+function renderAuditDetails(item) {
+    const id = _auditItemId(item);
+    const toggle = _auditToggleIds(id);
+    const caller = _auditCaller(item);
+    const reqJson = _auditRequestJson(item);
+    const resJson = _auditResponseJson(item);
+    const openState = _auditOpenState(toggle);
+    const userAgentDisplay = _auditUserAgentDisplay(caller.user_agent);
+
+    return `
+        <div style="margin-top:12px; border-top:1px solid var(--border-color); padding-top:12px;">
+            <details class="js-toggle" data-toggle-id="${toggle.audit}" ${openState.audit}>
+                <summary style="font-size:13px; color:var(--md-sys-color-secondary); margin-bottom:8px;">
+                    <span class="material-icons-sharp" style="font-size:14px">policy</span> Audit & Caller Info
+                </summary>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px; padding-left:16px;">
+                    <div class="item-secondary"><span class="material-icons-sharp" style="font-size:12px">language</span> IP: ${escapeHtml(caller.ip || 'Local')}</div>
+                    <div class="item-secondary" title="${userAgentDisplay.title}"><span class="material-icons-sharp" style="font-size:12px">devices</span> UA: ${userAgentDisplay.value}</div>
+                </div>
+            </details>
+            <details class="js-toggle" data-toggle-id="${toggle.req}" ${openState.req}>
+                <summary><span class="material-icons-sharp">code</span> Request Payload</summary>
+                <div class="json-buffer">${reqJson}</div>
+            </details>
+            <details class="js-toggle" data-toggle-id="${toggle.res}" ${openState.res} style="margin-top:8px;">
+                <summary><span class="material-icons-sharp">data_object</span> Response Payload</summary>
+                <div class="json-buffer">${resJson}</div>
+            </details>
+        </div>
+    `;
+}
+
+function _auditItemId(item) {
+    return item.task_id ? item.task_id : item.filename;
+}
+
+function _auditToggleIds(id) {
+    const base = String(id || '').replace(/[^a-zA-Z0-9_.-]/g, '_');
+    return {
+        audit: `${base}_audit`,
+        req: `${base}_req`,
+        res: `${base}_res`
+    };
+}
+
+function _auditCaller(item) {
+    return item.caller_info ? item.caller_info : {};
+}
+
+function _auditRequestJson(item) {
+    const requestPayload = item.request_json ? item.request_json : {};
+    return escapeHtml(JSON.stringify(requestPayload, null, 2));
+}
+
+function _auditResponseJson(item) {
+    const responsePayload = item.result ? item.result : (item.response_json ? item.response_json : {});
+    return escapeHtml(JSON.stringify(responsePayload, null, 2));
+}
+
+function _auditOpenState(toggle) {
+    return {
+        audit: expandedElements.has(toggle.audit) ? 'open' : '',
+        req: expandedElements.has(toggle.req) ? 'open' : '',
+        res: expandedElements.has(toggle.res) ? 'open' : ''
+    };
+}
+
+function _auditUserAgentDisplay(userAgent) {
+    if (!userAgent) {
+        return {
+            title: escapeHtml(''),
+            value: 'Not provided by client'
+        };
+    }
+    const shortUa = userAgent.length > 30 ? userAgent.substring(0, 30) + '...' : userAgent;
+    return {
+        title: escapeHtml(userAgent),
+        value: escapeHtml(shortUa)
+    };
+}

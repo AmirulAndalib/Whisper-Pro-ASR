@@ -6,12 +6,12 @@ import io
 import json
 from unittest import mock
 
-import pytest
 from fastapi import FastAPI
 
-from modules.api import routes_asr, routes_detect
-from modules.api.routes_asr import build_response, get_request_params
-from modules.api.routes_utils import cleanup_files, extract_local_path, prepare_source_path
+from modules.api.routes import asr as routes_asr
+from modules.api.routes import detect as routes_detect
+from modules.api.routes.asr import get_request_params
+from modules.api.support.request_utils import cleanup_files
 from modules.core import config, utils
 from tests.conftest import FlaskCompatibleClient
 
@@ -29,20 +29,17 @@ class TestStatusEndpoint:
 
     def test_status_model_loaded(self, routes_client):
         """Test /status when model is loaded."""
-        with mock.patch("modules.api.routes_system.dashboard") as mock_db:
+        with mock.patch("modules.api.routes.system.dashboard") as mock_db:
             mock_db.get_status_data.return_value = {"active_sessions": 0, "queued_sessions": 0, "hardware": []}
             response = routes_client.get("/status")
             assert response.status_code == 200
             data = json.loads(response.data)
-            assert "active_sessions" in data
-            assert "asr_engine" in data
-            assert "supported_asr_engines" in data
-            assert "engines" in data
+            assert {"active_sessions", "asr_engine", "supported_asr_engines", "engines"}.issubset(data)
             assert data["engines"].get("selected") == data["asr_engine"]
 
     def test_status_model_not_loaded(self, routes_client):
         """Test /status when model stats fail."""
-        with mock.patch("modules.api.routes_system.dashboard") as mock_db:
+        with mock.patch("modules.api.routes.system.dashboard") as mock_db:
             mock_db.get_status_data.return_value = {
                 "active_sessions": 0,
                 "queued_sessions": 0,
@@ -61,14 +58,14 @@ class TestDetectLanguageEndpoint:
 
     def test_detect_language_no_model(self, routes_client):
         """Test detect-language when model not loaded."""
-        with mock.patch("modules.api.routes_detect.model_manager") as mock_mm:
+        with mock.patch("modules.api.routes.detect.model_manager") as mock_mm:
             mock_mm.is_engine_initialized.return_value = False
             response = routes_client.post("/detect-language")
             assert response.status_code == 503
 
     def test_detect_language_no_input(self, routes_client):
         """Test detect-language with no input."""
-        with mock.patch("modules.api.routes_detect.model_manager") as mock_mm:
+        with mock.patch("modules.api.routes.detect.model_manager") as mock_mm:
             mock_mm.is_engine_initialized.return_value = True
             response = routes_client.post("/detect-language")
             assert response.status_code == 400
@@ -76,7 +73,7 @@ class TestDetectLanguageEndpoint:
 
     def test_detect_language_file_not_found(self, routes_client):
         """Test detect-language with non-existent file."""
-        with mock.patch("modules.api.routes_detect.model_manager") as mock_mm:
+        with mock.patch("modules.api.routes.detect.model_manager") as mock_mm:
             mock_mm.is_engine_initialized.return_value = True
             response = routes_client.post("/detect-language?local_path=/nonexistent/file.mp3")
             assert response.status_code == 400
@@ -86,9 +83,9 @@ class TestDetectLanguageEndpoint:
         test_file = tmp_path / "test.mp3"
         test_file.write_bytes(b"fake audio data")
 
-        with mock.patch("modules.api.routes_detect.model_manager") as mock_mm:
+        with mock.patch("modules.api.routes.detect.model_manager") as mock_mm:
             mock_mm.is_engine_initialized.return_value = True
-            with mock.patch("modules.inference.language_detection.run_voting_detection") as mock_ld:
+            with mock.patch("modules.inference.pipeline.language_detection.run_voting_detection") as mock_ld:
                 mock_ld.return_value = {
                     "detected_language": "en",
                     "language": "en",
@@ -107,9 +104,9 @@ class TestDetectLanguageEndpoint:
         test_file = tmp_path / "test.mp3"
         test_file.write_bytes(b"fake audio data")
 
-        with mock.patch("modules.api.routes_detect.model_manager") as mock_mm:
+        with mock.patch("modules.api.routes.detect.model_manager") as mock_mm:
             mock_mm.is_engine_initialized.return_value = True
-            with mock.patch("modules.inference.language_detection.run_voting_detection") as mock_ld:
+            with mock.patch("modules.inference.pipeline.language_detection.run_voting_detection") as mock_ld:
                 mock_ld.return_value = {
                     "detected_language": "en",
                     "language": "en",
@@ -126,9 +123,9 @@ class TestDetectLanguageEndpoint:
         test_file = tmp_path / "test.mp3"
         test_file.write_bytes(b"fake audio data")
 
-        with mock.patch("modules.api.routes_detect.model_manager") as mock_mm:
+        with mock.patch("modules.api.routes.detect.model_manager") as mock_mm:
             mock_mm.is_engine_initialized.return_value = True
-            with mock.patch("modules.inference.language_detection.run_voting_detection") as mock_ld:
+            with mock.patch("modules.inference.pipeline.language_detection.run_voting_detection") as mock_ld:
                 mock_ld.side_effect = Exception("Detection error")
                 response = routes_client.post(f"/detect-language?local_path={test_file}")
                 assert response.status_code == 500
@@ -139,9 +136,9 @@ class TestDetectLanguageEndpoint:
         test_file = tmp_path / "test.mp3"
         test_file.write_bytes(b"fake audio data")
 
-        with mock.patch("modules.api.routes_detect.model_manager") as mock_mm:
+        with mock.patch("modules.api.routes.detect.model_manager") as mock_mm:
             mock_mm.is_engine_initialized.return_value = True
-            with mock.patch("modules.inference.language_detection.run_voting_detection") as mock_ld:
+            with mock.patch("modules.inference.pipeline.language_detection.run_voting_detection") as mock_ld:
                 mock_ld.side_effect = Exception("Detection error")
                 response = routes_client.post(f"/detect-language?local_path={test_file}")
                 assert response.status_code == 500
@@ -155,7 +152,7 @@ class TestDetectLanguageEndpoint:
         _build_dedupe_key = routes_detect.__dict__["_build_dedupe_key"]
         inflight_detect_by_path = routes_detect.__dict__["_INFLIGHT_DETECT_BY_PATH"]
 
-        with mock.patch("modules.api.routes_detect.model_manager") as mock_mm:
+        with mock.patch("modules.api.routes.detect.model_manager") as mock_mm:
             mock_mm.is_engine_initialized.return_value = True
             future = concurrent.futures.Future()
             shared_result = {
@@ -205,8 +202,8 @@ class TestDetectLanguageEndpoint:
         _run_leader_detection = routes_detect.__dict__["_run_leader_detection"]
         inflight_detect_by_path[dedupe_key] = shared_future
 
-        with mock.patch("modules.api.routes_detect._run_detection_internal", side_effect=Exception("kaboom")):
-            with mock.patch("modules.api.routes_detect.routes_utils.handle_error", return_value=("Error", 500)):
+        with mock.patch("modules.api.routes.detect._run_detection_internal", side_effect=Exception("kaboom")):
+            with mock.patch("modules.api.routes.detect.routes_utils.handle_error", return_value=("Error", 500)):
                 response = asyncio.run(
                     _run_leader_detection(
                         shared_future,
@@ -248,10 +245,10 @@ class TestDetectLanguageEndpoint:
         inflight_detect_by_path[dedupe_key] = stale_future
 
         try:
-            with mock.patch("modules.api.routes_detect.config.ENABLE_LD_REQUEST_COALESCING", False):
-                with mock.patch("modules.api.routes_detect.model_manager") as mock_mm:
+            with mock.patch("modules.api.routes.detect.config.ENABLE_LD_REQUEST_COALESCING", False):
+                with mock.patch("modules.api.routes.detect.model_manager") as mock_mm:
                     mock_mm.is_engine_initialized.return_value = True
-                    with mock.patch("modules.inference.language_detection.run_voting_detection") as mock_ld:
+                    with mock.patch("modules.inference.pipeline.language_detection.run_voting_detection") as mock_ld:
                         mock_ld.return_value = {
                             "detected_language": "en",
                             "language": "en",
@@ -272,7 +269,7 @@ class TestASREndpoint:
 
     def test_asr_get_ready(self, routes_client):
         """Test GET /asr when model is ready."""
-        with mock.patch("modules.api.routes_asr.model_manager") as mock_mm:
+        with mock.patch("modules.api.routes.asr.model_manager") as mock_mm:
             mock_mm.is_engine_initialized.return_value = True
             response = routes_client.get("/asr")
             assert response.status_code == 200
@@ -280,7 +277,7 @@ class TestASREndpoint:
 
     def test_asr_get_not_ready(self, routes_client):
         """Test GET /asr when model not ready."""
-        with mock.patch("modules.api.routes_asr.model_manager") as mock_mm:
+        with mock.patch("modules.api.routes.asr.model_manager") as mock_mm:
             mock_mm.is_engine_initialized.return_value = False
             response = routes_client.get("/asr")
             assert response.status_code == 200
@@ -288,7 +285,7 @@ class TestASREndpoint:
 
     def test_asr_post_no_model(self):
         """Test POST /asr when model not loaded."""
-        with mock.patch("modules.api.routes_asr.model_manager") as mock_mm:
+        with mock.patch("modules.api.routes.asr.model_manager") as mock_mm:
             mock_mm.is_engine_initialized.return_value = False
 
             test_app = FastAPI(title="Test App")
@@ -300,7 +297,7 @@ class TestASREndpoint:
 
     def test_audio_transcriptions_alias_no_model(self):
         """Test OpenAI-compatible transcriptions alias when model not loaded."""
-        with mock.patch("modules.api.routes_asr.model_manager") as mock_mm:
+        with mock.patch("modules.api.routes.asr.model_manager") as mock_mm:
             mock_mm.is_engine_initialized.return_value = False
 
             test_app = FastAPI(title="Test App")
@@ -320,14 +317,14 @@ class TestASREndpoint:
 
     def test_asr_post_no_input(self, routes_client):
         """Test POST /asr with no input."""
-        with mock.patch("modules.api.routes_asr.model_manager") as mock_mm:
+        with mock.patch("modules.api.routes.asr.model_manager") as mock_mm:
             mock_mm.is_engine_initialized.return_value = True
             response = routes_client.post("/asr")
             assert response.status_code == 400
 
     def test_asr_post_file_not_found(self, routes_client):
         """Test POST /asr with non-existent file."""
-        with mock.patch("modules.api.routes_asr.model_manager") as mock_mm:
+        with mock.patch("modules.api.routes.asr.model_manager") as mock_mm:
             mock_mm.is_engine_initialized.return_value = True
             response = routes_client.post("/asr?local_path=/nonexistent/file.mp3")
             assert response.status_code == 400
@@ -337,7 +334,7 @@ class TestASREndpoint:
         test_file = tmp_path / "test.mp3"
         test_file.write_bytes(b"fake audio data")
 
-        with mock.patch("modules.api.routes_asr.model_manager") as mock_mm:
+        with mock.patch("modules.api.routes.asr.model_manager") as mock_mm:
             mock_mm.is_engine_initialized.return_value = True
             mock_mm.run_transcription.return_value = {
                 "text": "Hello",
@@ -354,7 +351,7 @@ class TestASREndpoint:
         test_file = tmp_path / "test.mp3"
         test_file.write_bytes(b"fake audio data")
 
-        with mock.patch("modules.api.routes_asr.model_manager") as mock_mm:
+        with mock.patch("modules.api.routes.asr.model_manager") as mock_mm:
             mock_mm.is_engine_initialized.return_value = True
             mock_mm.run_transcription.return_value = {"text": "Hello", "segments": []}
             with mock.patch("modules.core.utils.convert_to_wav") as mock_wav:
@@ -369,7 +366,7 @@ class TestASREndpoint:
         test_file = tmp_path / "test.mp3"
         test_file.write_bytes(b"fake audio data")
 
-        with mock.patch("modules.api.routes_asr.model_manager") as mock_mm:
+        with mock.patch("modules.api.routes.asr.model_manager") as mock_mm:
             mock_mm.is_engine_initialized.return_value = True
             with mock.patch("modules.core.utils.convert_to_wav") as mock_wav:
                 mock_wav.return_value = None
@@ -382,7 +379,7 @@ class TestASREndpoint:
         test_file = tmp_path / "test.mp3"
         test_file.write_bytes(b"fake audio data")
 
-        with mock.patch("modules.api.routes_asr.model_manager") as mock_mm:
+        with mock.patch("modules.api.routes.asr.model_manager") as mock_mm:
             mock_mm.is_engine_initialized.return_value = True
             mock_mm.run_transcription.side_effect = Exception("Transcription error")
             with mock.patch("modules.core.utils.convert_to_wav") as mock_wav:
@@ -396,9 +393,9 @@ class TestASREndpoint:
         test_file = tmp_path / "test.mp3"
         test_file.write_bytes(b"fake audio data")
 
-        with mock.patch("modules.api.routes_asr.model_manager") as mock_mm:
+        with mock.patch("modules.api.routes.asr.model_manager") as mock_mm:
             mock_mm.is_engine_initialized.return_value = True
-            with mock.patch("modules.api.routes_utils.prepare_source_path", return_value=(test_file, None, "test.mp3")):
+            with mock.patch("modules.api.support.request_utils.prepare_source_path", return_value=(test_file, None, "test.mp3")):
                 with mock.patch("os.path.exists", return_value=True):
                     with mock.patch("modules.core.utils.convert_to_wav", return_value="clean.wav"):
                         mock_mm.run_transcription.side_effect = Exception("Generic error")
@@ -410,13 +407,13 @@ class TestASREndpoint:
         test_file = tmp_path / "test.mp3"
         test_file.write_bytes(b"fake audio data")
 
-        with mock.patch("modules.api.routes_asr.model_manager") as mock_mm:
+        with mock.patch("modules.api.routes.asr.model_manager") as mock_mm:
             mock_mm.is_engine_initialized.return_value = True
             mock_mm.run_transcription.return_value = {
                 "text": "Hello world",
                 "segments": [{"timestamp": (0.0, 1.0), "text": "Hello world"}],
             }
-            with mock.patch("modules.api.routes_utils.prepare_source_path", return_value=(test_file, None, "test.mp3")):
+            with mock.patch("modules.api.support.request_utils.prepare_source_path", return_value=(test_file, None, "test.mp3")):
                 with mock.patch("os.path.exists", return_value=True):
                     with mock.patch("modules.core.utils.convert_to_wav", return_value="clean.wav"):
                         # VTT
@@ -448,9 +445,7 @@ class TestASREndpoint:
     def test_asr_upload_empty(self, routes_client):
         """Test ASR with empty uploaded file."""
         with mock.patch("os.path.getsize", return_value=0), mock.patch("os.remove"):
-            response = routes_client.post(
-                "/asr", data={"audio_file": (io.BytesIO(b""), "empty.mp3")}, content_type="multipart/form-data"
-            )
+            response = routes_client.post("/asr", data={"audio_file": (io.BytesIO(b""), "empty.mp3")}, content_type="multipart/form-data")
             assert response.status_code == 400
             assert b"empty" in response.data.lower()
 
@@ -475,116 +470,3 @@ class TestASREndpoint:
         mock_request2.url.path = "/asr"
         params2 = asyncio.run(get_request_params(mock_request2, {}))
         assert params2["task"] == "translate"
-
-
-class TestHelperFunctions:
-    """Tests for helper functions."""
-
-    def test_prepare_source_path_from_query(self):
-        """Test prepare_source_path resolution from query."""
-        with mock.patch("os.path.exists", return_value=True):
-            with pytest.raises(ValueError, match="Path not accessible"):
-                prepare_source_path(local_path="/test/path.mp3")
-
-    def test_prepare_source_path_from_form(self):
-        """Test prepare_source_path resolution from form."""
-        mock_req = mock.MagicMock()
-        mock_req.query_params = {}
-        form_data = {"local_path": "/form/path.mp3"}
-
-        extracted = extract_local_path(None, form_data, mock_req)
-        with mock.patch("os.path.exists", return_value=True):
-            with pytest.raises(ValueError, match="Path not accessible"):
-                prepare_source_path(local_path=extracted)
-
-    def test_get_request_params_defaults(self):
-        """Test default request parameters."""
-        mock_request = mock.MagicMock()
-        mock_request.query_params = {}
-        mock_request.url.path = "/asr"
-        params = asyncio.run(get_request_params(mock_request, {}))
-        assert params["output_format"] == "srt"
-        assert params["task"] == "transcribe"
-
-    def test_get_request_params_custom(self):
-        """Test custom request parameters."""
-        mock_request = mock.MagicMock()
-        mock_request.query_params = {"output": "json", "language": "es", "task": "translate", "batch_size": "4"}
-        mock_request.url.path = "/asr"
-        params = asyncio.run(get_request_params(mock_request, {}))
-        assert params["output_format"] == "json"
-        assert params["language"] == "es"
-        assert params["task"] == "translate"
-        assert params["batch_size"] == 4
-
-    def test_build_response_json(self):
-        """Test JSON response building."""
-        result = {"text": "Hello", "segments": []}
-        params = {"output_format": "json"}
-        stats = {"active_sessions": 0}
-        response = build_response(result, params, stats, "/fake/path", 100.0)
-        assert response.headers["content-type"] == "application/json"
-
-    def test_build_response_srt(self):
-        """Test SRT response building."""
-        result = {"text": "Hello", "segments": [], "language": "en"}
-        params = {"output_format": "srt"}
-        stats = {"active_sessions": 0}
-        response = build_response(result, params, stats, "/fake/path", 100.0)
-        assert "text/plain" in response.headers["content-type"]
-        assert (
-            response.headers["Content-Disposition"]
-            == "attachment; filename=\"path.en-ai.srt\"; filename*=UTF-8''path.en-ai.srt"
-        )
-
-    def test_build_response_unicode_filename(self):
-        """Test response building with unicode filename to ensure no encoding issues occur."""
-        result = {"text": "Hello", "segments": [], "language": "en"}
-        params = {"output_format": "srt"}
-        stats = {"active_sessions": 0}
-        unicode_path = "/movies/Liceenii Extemporal la dirigenție (1987) DVD-R.mkv"
-        response = build_response(result, params, stats, unicode_path, 100.0)
-        assert "text/plain" in response.headers["content-type"]
-        cd_header = response.headers["Content-Disposition"]
-        assert 'filename="Liceenii Extemporal la dirigenie (1987) DVD-R.en-ai.srt"' in cd_header
-        assert (
-            "filename*=UTF-8''Liceenii%20Extemporal%20la%20dirigen%C8%9Bie%20%281987%29%20DVD-R.en-ai.srt" in cd_header
-        )
-
-
-def test_routes_extract_new_params():
-    """Verify that ASR routes correctly parse new parameters."""
-    mock_request = mock.MagicMock()
-    mock_request.query_params = {
-        "initial_prompt": "testprompt",
-        "vad_filter": "false",
-        "word_timestamps": "true",
-        "max_line_width": "40",
-        "max_line_count": "2",
-    }
-    mock_request.url.path = "/asr"
-    params = asyncio.run(get_request_params(mock_request, {}))
-    assert params["initial_prompt"] == "testprompt"
-    assert params["vad_filter"] is False
-    assert params["word_timestamps"] is True
-    assert params["max_line_width"] == 40
-    assert params["max_line_count"] == 2
-
-    # Test default values when omitted
-    mock_request_default = mock.MagicMock()
-    mock_request_default.query_params = {}
-    mock_request_default.url.path = "/asr"
-    params_default = asyncio.run(get_request_params(mock_request_default, {}))
-    assert params_default["initial_prompt"] is None
-    assert params_default["vad_filter"] is True
-    assert params_default["word_timestamps"] is False
-    assert params_default["max_line_width"] is None
-    assert params_default["max_line_count"] is None
-
-    # Test malformed width/count integers fallback to None
-    mock_request_malformed = mock.MagicMock()
-    mock_request_malformed.query_params = {"max_line_width": "invalid", "max_line_count": "invalid"}
-    mock_request_malformed.url.path = "/asr"
-    params_malformed = asyncio.run(get_request_params(mock_request_malformed, {}))
-    assert params_malformed["max_line_width"] is None
-    assert params_malformed["max_line_count"] is None

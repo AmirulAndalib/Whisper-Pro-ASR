@@ -55,9 +55,11 @@ Ensures thread context registers and deletes all temporary audio WAV stems (stan
 Run integration tests checking priority request preemption behavior:
 
 ```bash
-python3 -m pytest tests/inference/priority/test_priority_concurrency.py \
-                  tests/inference/priority/test_priority_fifo_ordering.py \
-                  tests/inference/priority/test_priority_stage_preemption.py
+python3 -m pytest tests/inference/scheduler/priority/test_priority_concurrency.py \
+                  tests/inference/scheduler/priority/test_priority_concurrency_core_tests.py \
+                  tests/inference/scheduler/priority/test_priority_concurrency_extended_tests.py \
+                  tests/inference/scheduler/priority/test_priority_fifo_ordering.py \
+                  tests/inference/scheduler/priority/test_priority_stage_preemption.py
 ```
 
 ### 2. Assert Priority Parallelism and Unit Resume
@@ -68,4 +70,5 @@ python3 -m pytest tests/inference/priority/test_priority_concurrency.py \
 ### 3. Verify Temp Storage Cleanup
 
 - Verify that mock tasks registering files via `tracked_files` successfully clear all listed paths upon execution exit.
-- Check test results in `tests/inference/priority/test_priority_concurrency.py` targeting file cleanup routines.
+- Check test results in `tests/inference/scheduler/priority/test_priority_concurrency.py` and `tests/inference/scheduler/priority/test_priority_concurrency_extended_tests.py` targeting cleanup and targeted-preemption routines.
+

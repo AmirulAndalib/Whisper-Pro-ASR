@@ -1,25 +1,22 @@
 """Comprehensive coverage for utility functions."""
 
 import importlib
-import os
 import sys
 import time
 from unittest import mock
 
 import pytest
 
-from modules.core import utils
+from modules.core import subtitles, utils
+
+
+def _get_stage_updates(mock_update_stage):
+    return [call.args[1] for call in mock_update_stage.call_args_list if len(call.args) >= 2]
 
 
 def test_convert_to_wav_success():
     """Test successful conversion to WAV."""
-    mock_process = mock.MagicMock()
-    mock_process.__enter__.return_value = mock_process
-    mock_process.stdout.readline.side_effect = ["out_time_ms=1000000", ""]
-    mock_process.communicate.return_value = (None, "")
-    mock_process.returncode = 0
-
-    with mock.patch("modules.core.utils.subprocess.Popen", return_value=mock_process):
+    with mock.patch("modules.core.utils._run_ffmpeg_standardization"):
         with mock.patch("os.path.exists", return_value=True):
             with mock.patch("os.path.getsize", return_value=1024):
                 original_get_audio_duration = utils.get_audio_duration
@@ -35,13 +32,7 @@ def test_convert_to_wav_success():
 
 def test_convert_to_wav_subprocess_error():
     """Test convert_to_wav handles subprocess errors."""
-    with mock.patch("modules.core.utils.subprocess.Popen") as mock_popen:
-        mock_process = mock.MagicMock()
-        mock_process.__enter__.return_value = mock_process
-        mock_process.stdout.readline.return_value = ""
-        mock_process.returncode = 1
-        mock_popen.return_value = mock_process
-
+    with mock.patch("modules.core.utils._run_ffmpeg_standardization", side_effect=RuntimeError("ffmpeg failed")):
         with mock.patch("os.path.exists", return_value=True):
             with mock.patch("os.path.getsize", return_value=123):
                 with mock.patch("os.remove") as mock_remove:
@@ -53,14 +44,14 @@ def test_convert_to_wav_subprocess_error():
 
 def test_get_audio_duration_success():
     """Test successful duration retrieval."""
-    with mock.patch("subprocess.check_output", return_value=b"123.45\n"):
+    with mock.patch("modules.core.process_exec.check_output_text", return_value="123.45\n"):
         result = utils.get_audio_duration("test.wav")
         assert result == 123.45
 
 
 def test_get_audio_duration_error():
     """Test duration retrieval error fallback."""
-    with mock.patch("subprocess.check_output", side_effect=Exception("fail")):
+    with mock.patch("modules.core.process_exec.check_output_text", side_effect=Exception("fail")):
         assert utils.get_audio_duration("test.wav") == 0.0
 
 
@@ -69,25 +60,6 @@ def test_format_duration_variants():
     assert utils.format_duration(0) == "00:00:00"
     assert utils.format_duration(3661) == "01:01:01"
     assert utils.format_duration(59) == "00:00:59"
-
-
-def test_generate_srt_edge_cases():
-    """Test SRT generation with various input structures."""
-    # 1. Standard
-    res = {"text": "Hello world", "segments": [{"start": 0.0, "end": 1.0, "text": "Hello world"}]}
-    srt = utils.generate_srt(res)
-    assert "00:00:00,000 --> 00:00:01,000" in srt
-    assert "Hello world" in srt
-
-    # 2. Results without segments but with text
-    res = {"text": "Simple text"}
-    srt = utils.generate_srt(res)
-    assert "Simple text" in srt
-    assert "00:00:00,000 --> 00:00:05,000" in srt
-
-    # 3. Completely empty results
-    srt = utils.generate_srt({})
-    assert "[No dialogue detected]" in srt
 
 
 def test_generate_vtt():
@@ -113,6 +85,18 @@ def test_generate_tsv():
     assert "1000\t2000\tTuple" in tsv
 
 
+def test_resolve_segment_timestamps_coalesces_end_to_default_end():
+    """Segment end timestamp should coalesce to caller-provided default_end when missing/None."""
+    resolve_func = getattr(subtitles, "_resolve_segment_timestamps")
+    start_ts, end_ts = resolve_func({"start": 1.25, "end": None}, default_end=7.5)
+    assert start_ts == 1.25
+    assert end_ts == 7.5
+
+    start_ts_tuple, end_ts_tuple = resolve_func({"timestamp": (2.0, None)}, default_end=9.0)
+    assert start_ts_tuple == 2.0
+    assert end_ts_tuple == 9.0
+
+
 def test_get_system_telemetry():
     """Test gathering system telemetry via psutil mocks."""
     with mock.patch("modules.core.utils.psutil.cpu_percent", return_value=10.0):
@@ -131,6 +115,21 @@ def test_get_system_telemetry():
                     # Normalized by cpu_count=4 => 5.0/4 = 1.25 -> rounded to 1.2
                     assert telemetry["app_cpu_percent"] == 1.2
                     assert telemetry["app_memory_gb"] == 1.0
+
+
+def test_get_nvidia_vram_usage_mb_sums_visible_devices():
+    """VRAM probe should sum memory.used across all visible NVIDIA devices."""
+    with (
+        mock.patch("modules.core.utils.which", return_value="/usr/bin/nvidia-smi"),
+        mock.patch("modules.core.process_exec.check_output_text", return_value="1024\n512\n"),
+    ):
+        assert utils.get_nvidia_vram_usage_mb() == 1536
+
+
+def test_get_nvidia_vram_usage_mb_returns_none_without_nvidia_smi():
+    """VRAM probe should degrade gracefully when nvidia-smi is unavailable."""
+    with mock.patch("modules.core.utils.which", return_value=None):
+        assert utils.get_nvidia_vram_usage_mb() is None
 
 
 def test_get_pretty_model_name():
@@ -156,7 +155,7 @@ def test_cleanup_old_files(tmp_path):
         # Test exception path
         fail_file = test_dir / "fail.wav"
         fail_file.write_text("fail")
-        with mock.patch("modules.core.utils.os.remove", side_effect=Exception("Cleanup Fail")):
+        with mock.patch("modules.core.utils.os.remove", side_effect=OSError("Cleanup Fail")):
             utils.cleanup_old_files(str(test_dir), days=5)
             assert fail_file.exists()  # Should still exist if remove fails
 
@@ -179,28 +178,48 @@ def test_clear_gpu_cache():
     """Test GPU cache clearing."""
     with mock.patch("modules.core.utils.torch") as mock_torch:
         mock_torch.cuda.is_available.return_value = True
+        mock_torch.cuda.device_count.return_value = 1
         utils.clear_gpu_cache()
         mock_torch.cuda.empty_cache.assert_called_once()
 
 
-def test_subtitle_wrapping_logic():
-    """Verify text wrapping utilities and layout constraints in SRT/VTT writers."""
-    # Test wrap_text directly
+def test_clear_gpu_cache_clears_all_visible_cuda_devices():
+    """Multi-CUDA hosts should clear allocator caches on every visible device."""
+    with mock.patch("modules.core.utils.torch") as mock_torch:
+        mock_torch.cuda.is_available.return_value = True
+        mock_torch.cuda.device_count.return_value = 3
+
+        device_ctx = mock.MagicMock()
+        mock_torch.cuda.device.return_value = device_ctx
+
+        utils.clear_gpu_cache()
+
+        assert mock_torch.cuda.device.call_count == 3
+        assert device_ctx.__enter__.call_count == 3
+        assert mock_torch.cuda.empty_cache.call_count == 3
+
+
+def test_wrap_text_limits_line_length():
+    """Verify wrap_text enforces the requested maximum width."""
     long_text = "This is a very long text that we want to wrap to a maximum width of characters."
     wrapped = utils.wrap_text(long_text, max_line_width=20)
-    lines = wrapped.split("\n")
-    for line in lines:
+    for line in wrapped.split("\n"):
         assert len(line) <= 20
 
-    # Test max_line_count limit
+
+def test_wrap_text_limits_line_count():
+    """Verify wrap_text caps the number of lines."""
+    long_text = "This is a very long text that we want to wrap to a maximum width of characters."
     limited = utils.wrap_text(long_text, max_line_width=20, max_line_count=2)
     assert len(limited.split("\n")) == 2
 
-    # Test SRT/VTT formatters wrapping
+
+def test_subtitle_formatters_wrap_text():
+    """Verify SRT and VTT formatters apply the same wrapping rules."""
+    long_text = "This is a very long text that we want to wrap to a maximum width of characters."
     result = {"segments": [{"start": 0.0, "end": 5.0, "text": long_text}]}
 
     srt_out = utils.generate_srt(result, max_line_width=20, max_line_count=2)
-    # The segment text block should contain wrapped lines and be capped at 2 lines
     assert "wrap to a maximum" not in srt_out
     assert "This is a very long\ntext that we want to" in srt_out
 
@@ -209,8 +228,8 @@ def test_subtitle_wrapping_logic():
     assert "This is a very long\ntext that we want to" in vtt_out
 
 
-def test_generate_srt_vtt_highlight_words():
-    """Verify subtitle generators support highlight_words parameter."""
+def test_generate_srt_highlight_words():
+    """Verify SRT highlighting splits words into separate cues."""
     res = {
         "segments": [
             {
@@ -222,14 +241,26 @@ def test_generate_srt_vtt_highlight_words():
         ]
     }
 
-    # 1. Test SRT highlighting (generates individual sub-blocks for each word)
     srt = utils.generate_srt(res, highlight_words=True)
     assert "1\n00:00:00,500 --> 00:00:01,000" in srt
     assert '<font color="#E0E0E0">Hello</font> world' in srt
     assert "2\n00:00:01,000 --> 00:00:02,000" in srt
     assert 'Hello <font color="#E0E0E0">world</font>' in srt
 
-    # 2. Test VTT highlighting (generates intra-cue karaoke timestamps)
+
+def test_generate_vtt_highlight_words():
+    """Verify VTT highlighting emits karaoke timestamps."""
+    res = {
+        "segments": [
+            {
+                "start": 0.5,
+                "end": 2.0,
+                "text": "Hello world",
+                "words": [{"word": " Hello", "start": 0.5, "end": 1.0}, {"word": " world", "start": 1.0, "end": 2.0}],
+            }
+        ]
+    }
+
     vtt = utils.generate_vtt(res, highlight_words=True)
     assert "WEBVTT" in vtt
     assert "00:00:00.500 --> 00:00:02.000" in vtt
@@ -299,7 +330,7 @@ def test_parse_ffmpeg_progress_updates_dashboard_stage_with_percentage():
         speed = utils.parse_ffmpeg_progress(process, 10.0)
 
     assert speed == "1.50x"
-    stage_updates = [call.args[1] for call in mock_update_stage.call_args_list if len(call.args) >= 2]
+    stage_updates = _get_stage_updates(mock_update_stage)
     assert "FFmpeg (10%)" in stage_updates
     assert "FFmpeg (60%)" in stage_updates
 
@@ -333,39 +364,50 @@ def test_torch_import_none():
     importlib.reload(utils)
 
 
-def test_context_var_proxy_edge_cases():
-    """Verify ContextVarProxy edge attributes and deletions."""
-    # Attribute missing source_path
+def test_context_var_proxy_missing_source_path_raises():
+    """Accessing source_path before it is set should raise AttributeError."""
     with pytest.raises(AttributeError):
         _ = utils.THREAD_CONTEXT.source_path
 
-    # Setters and getters
+
+def test_context_var_proxy_tracked_files_round_trip():
+    """Tracked files should support set and delete operations."""
     utils.THREAD_CONTEXT.tracked_files = ["/tmp/fake.wav"]
     assert utils.THREAD_CONTEXT.tracked_files == ["/tmp/fake.wav"]
 
-    utils.THREAD_CONTEXT.source_path = "/tmp/fake.wav"
-    assert utils.THREAD_CONTEXT.source_path == "/tmp/fake.wav"
-
-    # Deletions
     del utils.THREAD_CONTEXT.tracked_files
     assert not utils.THREAD_CONTEXT.tracked_files
+
+
+def test_context_var_proxy_source_path_round_trip():
+    """Source path should support set and delete operations."""
+    utils.THREAD_CONTEXT.source_path = "/tmp/fake.wav"
+    assert utils.THREAD_CONTEXT.source_path == "/tmp/fake.wav"
 
     del utils.THREAD_CONTEXT.source_path
     with pytest.raises(AttributeError):
         _ = utils.THREAD_CONTEXT.source_path
 
+
+def test_context_var_proxy_filename_delete_raises():
+    """Deleting filename should reset the attribute to missing."""
+    utils.THREAD_CONTEXT.filename = "file.mp3"
     del utils.THREAD_CONTEXT.filename
     with pytest.raises(AttributeError):
         _ = utils.THREAD_CONTEXT.filename
 
-    # Dynamic attribute deletion
+
+def test_context_var_proxy_dynamic_attribute_delete():
+    """Dynamic attributes should be removed from the proxy dictionary."""
     utils.THREAD_CONTEXT.custom_val = "custom"
     assert utils.THREAD_CONTEXT.custom_val == "custom"
     del utils.THREAD_CONTEXT.custom_val
     with pytest.raises(AttributeError):
         _ = utils.THREAD_CONTEXT.custom_val
 
-    # setattr / hasattr fallback path
+
+def test_get_tracked_files_falls_back_after_attribute_error():
+    """get_tracked_files should recover when tracked_files access initially fails."""
     original_getattr = utils.ContextVarProxy.__getattr__
     raise_err = True
 
@@ -377,24 +419,23 @@ def test_context_var_proxy_edge_cases():
         return original_getattr(self, name)
 
     with mock.patch.object(utils.ContextVarProxy, "__getattr__", mock_getattr):
-        # Clear/delete tracked_files context first
         del utils.THREAD_CONTEXT.tracked_files
         files = utils.get_tracked_files()
         assert not files
 
 
-def test_convert_base_edge_cases(tmp_path):
-    """Test standard conversion filter config, prepare_for_uvr, and conversion failures."""
-    # loudnorm filter configuration path
+def test_convert_base_uses_loudnorm_filter_when_configured():
+    """The loudnorm filter configuration should survive module reloads."""
     with mock.patch("modules.core.config.FFMPEG_FILTER", "loudnorm"):
         importlib.reload(utils)
         assert utils.STANDARD_NORMALIZATION_FILTERS == "loudnorm=I=-16:TP=-1.5:LRA=11"
     importlib.reload(utils)
 
-    # prepare_for_uvr
+
+def test_prepare_for_uvr_reuses_conversion_output(tmp_path):
+    """prepare_for_uvr should return the converted output when conversion succeeds."""
     test_file = tmp_path / "hq_test.wav"
     test_file.write_text("audio")
-    # prepare_for_uvr (which calls conversion since extension skip is removed)
     with (
         mock.patch("modules.core.utils._convert_base", return_value="converted.wav") as mock_conv,
         mock.patch("modules.core.utils.track_file", return_value="converted.wav"),
@@ -402,18 +443,21 @@ def test_convert_base_edge_cases(tmp_path):
         assert utils.prepare_for_uvr(str(test_file)) == "converted.wav"
         mock_conv.assert_called_once()
 
-    # prepare_for_uvr with conversion
+
+def test_prepare_for_uvr_converts_non_wav_inputs(tmp_path):
+    """prepare_for_uvr should invoke conversion for non-WAV inputs."""
     test_mp3 = tmp_path / "hq_test.mp3"
     test_mp3.write_text("audio")
 
-    _convert_base = utils.__dict__["_convert_base"]
     with (
         mock.patch("modules.core.utils._convert_base", return_value="converted.wav"),
         mock.patch("modules.core.utils.track_file", return_value="converted.wav"),
     ):
         assert utils.prepare_for_uvr(str(test_mp3)) == "converted.wav"
 
-    # convert_base yield_cb and failures
+
+def test_convert_base_yield_callback_runs_on_failure(tmp_path):
+    """Conversion failures should trigger the cooperative yield callback."""
     test_err_file = tmp_path / "err_test.mp3"
     test_err_file.write_text("bad data")
 
@@ -429,13 +473,19 @@ def test_convert_base_edge_cases(tmp_path):
         mock.patch("modules.core.utils.get_audio_duration", return_value=5.0),
         mock.patch("os.remove", side_effect=OSError("remove error")),
     ):
-        res = _convert_base(str(test_err_file), utils.STANDARD_AUDIO_FLAGS, 16000, 1, yield_cb=_yield)
+        res = utils.__dict__["_convert_base"](
+            str(test_err_file),
+            utils.STANDARD_AUDIO_FLAGS,
+            16000,
+            1,
+            yield_cb=_yield,
+        )
         assert res is None
         assert yield_calls == 1
 
 
 def test_run_ffmpeg_standardization_edge_cases(tmp_path):
-    """Verify hwaccel command injection, default flags, and watchdog timeout/termination."""
+    """Verify hwaccel command injection and timeout handling."""
     output_wav = tmp_path / "out.wav"
 
     # default flags and hwaccel
@@ -443,50 +493,23 @@ def test_run_ffmpeg_standardization_edge_cases(tmp_path):
     with (
         mock.patch("modules.core.config.FFMPEG_HWACCEL", "cuvid"),
         mock.patch("modules.core.config.FFMPEG_THREADS", 2),
-        mock.patch("subprocess.Popen") as mock_popen,
+        mock.patch("modules.core.process_exec.run_stream") as mock_run_stream,
     ):
-        mock_proc = mock.MagicMock()
-        mock_proc.__enter__.return_value = mock_proc
-        mock_proc.stdout.readline.return_value = ""
-        mock_proc.returncode = 0
-        mock_popen.return_value = mock_proc
-
         _run_ffmpeg_standardization("in.mp3", str(output_wav), 10.0, flags=None)
-        args, _ = mock_popen.call_args
-        command = args[0]
+        command = mock_run_stream.call_args.args[0]
         assert "-hwaccel" in command
         assert "cuvid" in command
 
     # timeout logic trigger
     with (
         mock.patch("modules.core.config.FFMPEG_HWACCEL", "none"),
-        mock.patch("subprocess.Popen") as mock_popen,
-        mock.patch("threading.Timer") as mock_timer,
+        mock.patch(
+            "modules.core.process_exec.run_stream",
+            side_effect=utils.process_exec.CommandTimeoutError("timeout"),
+        ),
     ):
-        mock_proc = mock.MagicMock()
-        mock_proc.__enter__.return_value = mock_proc
-        mock_proc.stdout.readline.return_value = ""
-        mock_proc.poll.side_effect = [None, None]  # still active during kill
-        mock_proc.returncode = 0
-        mock_popen.return_value = mock_proc
-
-        def timer_cb():
-            pass
-
-        def mock_timer_init(_timeout, callback, *_args, **_kwargs):
-            nonlocal timer_cb
-            timer_cb = callback
-            return mock.MagicMock()
-
-        mock_timer.side_effect = mock_timer_init
-
-        _run_ffmpeg_standardization("in.mp3", str(output_wav), 0.01)
-        assert timer_cb is not None
-
-        # Trigger the kill_process callback
-        timer_cb()
-        mock_proc.terminate.assert_called_once()
-        mock_proc.kill.assert_called_once()
+        with pytest.raises(RuntimeError, match="timed out"):
+            _run_ffmpeg_standardization("in.mp3", str(output_wav), 0.01)
 
 
 def test_parse_ffmpeg_progress_edge_cases():
@@ -535,7 +558,7 @@ def test_cleanup_old_files_missing_directory():
 
 
 def test_purge_temporary_assets_no_env_and_files(tmp_path):
-    """Verify purge_temporary_assets without env var, and file purging behavior."""
+    """Verify purge_temporary_assets uses config temp dir and purges only matching files."""
     fake_temp = tmp_path / "fake_temp"
     fake_temp.mkdir()
 
@@ -546,11 +569,7 @@ def test_purge_temporary_assets_no_env_and_files(tmp_path):
     non_target_file = fake_temp / "keep.txt"
     non_target_file.write_text("data")
 
-    # Clear env to trigger fallback
-    with (
-        mock.patch.dict(os.environ, {"WHISPER_TEMP_DIR": ""}),
-        mock.patch("tempfile.gettempdir", return_value=str(tmp_path)),
-    ):
+    with mock.patch("modules.core.utils_helpers.config.get_temp_dir", return_value=str(fake_temp)):
         # We also mock os.path.exists to return True for our fake_temp
         with (
             mock.patch("os.path.exists", return_value=True),

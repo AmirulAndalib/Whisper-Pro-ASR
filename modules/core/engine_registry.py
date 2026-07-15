@@ -41,11 +41,19 @@ def _available_hardware_types(hardware_units: list[dict]) -> set[str]:
 
 def _validate_hardware_units(hardware_units: list[dict]):
     """Ensure hardware_units list conforms to structure expectations."""
+    _validate_hardware_units_container(hardware_units)
+    for idx, unit in enumerate(hardware_units):
+        _validate_hardware_unit_item(idx, unit)
+
+
+def _validate_hardware_units_container(hardware_units):
     if not isinstance(hardware_units, list) or not hardware_units:
         raise ValueError("hardware_units must be a non-empty list of unit dictionaries")
-    for idx, unit in enumerate(hardware_units):
-        if not isinstance(unit, dict) or "type" not in unit:
-            raise ValueError(f"hardware_units[{idx}] must be a dict containing a 'type' key")
+
+
+def _validate_hardware_unit_item(idx: int, unit):
+    if not isinstance(unit, dict) or "type" not in unit:
+        raise ValueError(f"hardware_units[{idx}] must be a dict containing a 'type' key")
 
 
 def resolve_auto_engine(hardware_units: list[dict]) -> tuple[str, str]:
