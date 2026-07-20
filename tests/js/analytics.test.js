@@ -3,7 +3,7 @@ const path = require("path");
 const { JSDOM } = require("jsdom");
 const { evalInContext, loadScriptInContext, createMatchMediaStub } = require("./helpers");
 
-describe("analytics.js", () => {
+describe("main.js", () => {
   let dom;
   let context;
   let fetchMock;
@@ -42,7 +42,7 @@ describe("analytics.js", () => {
     fetchMock = vi.fn(async () => ({ json: async () => ({}) }));
 
     context = loadScriptInContext(
-      path.join(__dirname, "../../modules/monitoring/templates/analytics.js"),
+      path.join(__dirname, "../../modules/monitoring/templates/analytics/main.js"),
       {
         window: {
           matchMedia: createMatchMediaStub(false),
@@ -91,7 +91,7 @@ describe("analytics.js", () => {
 
   it("fetches analytics and calls renderer", async () => {
     const payload = { cumulative: { all_time: 10, count_all_time: 1 }, daily: {} };
-    fetchMock.mockResolvedValueOnce({ json: async () => payload });
+    fetchMock.mockResolvedValueOnce({ ok: true, status: 200, json: async () => payload });
     const renderSpy = vi.spyOn(context, "renderAnalytics");
 
     await context.fetchAnalytics();

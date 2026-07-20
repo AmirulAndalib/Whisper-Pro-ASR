@@ -34,10 +34,19 @@ services:
     restart: unless-stopped
 
     # 1. Intel Silicon (NPU/GPU)
+    # Linux Intel hosts:
+    # group_add:
+    #   - "991"  # Intel render/accel group on Linux hosts
     # devices:
-    #   - /dev/dri:/dev/dri # Intel iGPU / Arc
-    #   - /dev/accel/accel0:/dev/accel/accel0 # Intel NPU
-    #   - /dev/dxg:/dev/dxg # Windows/WSL2 GPU mapping
+    #   - /dev/dri:/dev/dri # Intel iGPU / Arc (all render nodes)
+    #   - /dev/accel:/dev/accel # Intel NPU (all accel nodes)
+    # Windows 11 / WSL2 Intel hosts:
+    # devices:
+    #   - /dev/dxg:/dev/dxg # WSL GPU bridge
+    #   - /dev/dri:/dev/dri # Optional if WSL exposes DRM render nodes
+    #   - /dev/accel:/dev/accel # Optional if WSL exposes Intel NPU accel nodes
+    # pid: host
+    # privileged: true
 
     # 2. NVIDIA Silicon (CUDA)
     # Note: Requires NVIDIA Container Toolkit on the HOST for driver passthrough.
@@ -60,7 +69,7 @@ services:
       # Persistent cache for AI models and pre-compiled hardware binaries (NPU)
       - ./model_cache:/app/model_cache
       # Persistent storage for task history, telemetry, and system logs
-      - ./state:/app/data
+      - ./data:/app/data
       # Recommended: Map your media volumes to enable instant (0-copy) local processing
       # The service will prioritize reading these files directly over network uploads.
       - /path/to/my/media:/media
@@ -98,11 +107,19 @@ python3 -m ruff format --check .
 python3 -m ruff check .
 python3 -m flake8 modules whisper_pro_asr.py tests tests/check_coverage.py
 python3 -m pylint modules whisper_pro_asr.py tests
+git ls-files -z '*.py' | xargs -0 -r python3 -m radon cc -n B
+hadolint Dockerfile Dockerfile.test
+shellcheck scripts/ci/build-and-test.sh tests/run_suite.sh .agent/skills/workflow/resolve-pr-comments-run.sh
+npm run lint:html
+npm run lint:css
+pwsh -NoLogo -NoProfile -Command "$issues = Invoke-ScriptAnalyzer -Path scripts -Recurse -IncludeDefaultRules -Severity Warning,Error,Information; if ($issues) { $issues | Format-Table ScriptName,Line,Severity,RuleName,Message -AutoSize; exit 1 }"
 ```
 
-Flake8 policy is strict: `max-line-length = 140` with no ignore directives.
+Cyclomatic complexity policy is strict: any Radon result with rank `B` or worse fails CI and local parity build pipelines. Required baseline is 100% rank `A` (complexity <= 5).
 
-Coverage policy for monitored dashboard JavaScript files (`modules/monitoring/templates/*.js`):
+Ruff and Flake8 policy are strict at `140` columns, with no ignore directives.
+
+Coverage policy for monitored dashboard and analytics JavaScript files (`modules/monitoring/templates/dashboard/**/*.js` and `modules/monitoring/templates/analytics/**/*.js`):
 
 - Per-file minimum `90%` for `lines` and `statements`.
 - CI fails when any monitored file drops below threshold.
@@ -116,7 +133,7 @@ CodeRabbit review guidance is stored in [.coderabbit.yaml](.coderabbit.yaml) and
 - **WhisperX Integration**: Identify who said what with automatic speaker diarization powered by WhisperX alignment and PyAnnote speaker segmentation.
 - **Speaker Labels**: Output formats (SRT, VTT, TXT, TSV) include speaker identification labels (e.g., `[SPEAKER_00]: Hello world`).
 - **Configurable Speakers**: Control diarization with `min_speakers` and `max_speakers` parameters for optimal speaker count estimation.
-- **Graceful Fallback**: If diarization fails or `HF_TOKEN` is not configured, the system seamlessly falls back to standard transcription.
+- **Graceful Fallback**: If diarization fails or no token is configured (`DIARIZATION_HF_TOKEN`), the system seamlessly falls back to standard transcription.
 
 ### Precision Architecture
 
@@ -129,7 +146,6 @@ CodeRabbit review guidance is stored in [.coderabbit.yaml](.coderabbit.yaml) and
 - **FIFO Fairness with Priority Yielding**: Tasks are processed in arrival order within the same priority tier. High-priority language detection still preempts ASR when needed, but detect-language requests are also processed FIFO among themselves.
 - **Deterministic Dashboard Ordering**: Active and historical task cards are rendered in arrival order (`start_time`) so operators see the same sequence tasks entered the system.
 - **Intel ASR Chunking & Streaming**: Refactored OpenVINO engine transcription to split long media files dynamically into structured chunks guided by speech VAD timestamps, ensuring stability on very long movies.
-- **O(1) Live Subtitle Updates**: Appends pre-formatted subtitle blocks incrementally to the live SRT stream during processing instead of doing full $O(N^2)$ stream reconstructions.
 - **UVR Chunk Progress Tracking**: Computes and emits real-time preprocessing progress updates per UVR chunk to keep the dashboard progress bar fluid during vocal separation.
 - **Graceful Temp-Storage Fallback**: Establishes a 2GB minimum free space threshold and 1.5x file-size headroom multiplier to fallback gracefully to persistent storage when tmpfs runs low on space, preventing ENOSPC crashes.
 - **Cooperative Pre-emption**: High-priority operations (such as language detection) pause long-running ASR at deterministic checkpoints, including pre-vocal-separation, HQ-prep FFmpeg progress boundaries, and pre-inference, ensuring responsive API behavior under saturation.
@@ -145,7 +161,7 @@ CodeRabbit review guidance is stored in [.coderabbit.yaml](.coderabbit.yaml) and
 - **Fail-Safe Dual-Path VAD**: Intelligent logic that verifies speech presence on both isolated and raw audio, selecting the optimal path automatically based on signal clarity.
 - **Confusion-Matrix Tie Breaking**: Resolves linguistic ambiguities between similar pairs (e.g., NO/NN) with a weighted bias, eliminating common identification hallucinations.
 - **Unified Session Orchestration**: Integrated task and queue tracking ensures that hardware resources are only reclaimed when the system is fully idle (zero active or waiting tasks).
-- **Proactive Resource Reclamation**: Automatically offloads heavy models and clears hardware caches (CUDA/NPU) only when the queue is empty.
+- **Proactive Resource Reclamation**: Automatically offloads heavy models and clears hardware caches (CUDA/NPU) only when the queue is empty, with reclaim logs reporting both process RSS and CUDA VRAM deltas when NVIDIA telemetry is available.
 - **Weighted Multi-Segment Voting**: Aggregates probabilities from multiple zones with confidence-weighted averaging for industrial-strength accuracy.
 - **Advanced Memory Hygiene**: Implements a "Nuclear Purge" strategy using `malloc_trim` and ctranslate2 cache clearing to ensure idle memory remains below 500MB even after heavy ASR sessions.
 - **Telemetry Downsampling**: Dual-layer downsampling (server-side and client-side) caps telemetry chart data at 300 points, ensuring smooth dashboard rendering even after extended operation.
@@ -159,11 +175,11 @@ CodeRabbit review guidance is stored in [.coderabbit.yaml](.coderabbit.yaml) and
 - **Endpoint Taxonomy (Contract)**: `/asr` and `/v1/audio/...` are equivalent standard-priority ASR surfaces, while `/detect-language` (and alias `/detectlang`) is the high-priority language-identification surface.
 - **Interactive Documentation**: Full OpenAPI/Swagger interface available at `/docs` for testing and endpoint exploration.
 - **Live SRT Streaming**: Features a real-time, auto-scrolling SubRip (SRT) display during processing, providing immediate visual feedback identical to the final output.
-- **Persistent History Dashboard**: Maintains a durable log of all ASR and Language Detection tasks. Completed transcriptions are stored indefinitely and can be downloaded as `.srt` files directly from the dashboard.
-- **Industrial Telemetry**: Real-time progress monitoring, including completion percentages (%), segment counts (`Seg 11 | 01:20 / 05:00`), active processing stages (e.g., UVR Preprocessing, Transcribing), and detailed hardware state reporting.
+- **Persistent History Dashboard**: Maintains a durable log of all ASR and Language Detection tasks, including the hardware unit used for each completed task. Completed transcriptions are stored indefinitely and can be downloaded as `.srt` files directly from the dashboard.
+- **Industrial Telemetry**: Real-time progress monitoring, including completion percentages (%), segment counts (`Seg 11 | 01:20 / 05:00`), active processing stages (e.g., UVR Preprocessing, Transcribing), and detailed hardware state reporting. NVIDIA usage is sourced from `nvidia-smi`, while Intel GPU and NPU utilization prefer native device counters before falling back to Windows performance counters or task/activity inference when needed.
 - **Granular Performance Auditing**: Every task provides a detailed breakdown of its execution phases, including exact time spent in **Queue**, **Vocal Isolation**, and **AI Inference**.
 - **Material Design Dashboard**: A comprehensive monitoring interface at `/dashboard` (or the root `/` when accessed via browser) featuring live task progress bars, system resource visualization, real-time auto-scrolling logs, and a **Live Refresh** toggle with fixed polling intervals (1s, 2s, 5s, 10s).
-- **Bazarr Optimized**: Purpose-built for high-volume subtitle automation with stable SRT, VTT, and verbose JSON output formats. Fully compatible with `whisper-asr-webservice` API.
+- **Bazarr Optimized**: Purpose-built for high-volume subtitle automation with stable SRT, VTT, and verbose JSON output formats.
 
 ---
 
@@ -200,7 +216,7 @@ The service is highly tunable via environment variables in `docker-compose.yml`.
 | :--- | :--- | :--- |
 | **Runtime Control** | | |
 | `ASR_DEVICE` | `AUTO` | Inference target: `AUTO`, `CUDA`, or `CPU`. |
-| `ASR_PREPROCESS_DEVICE` | `AUTO` | Inference target: `AUTO`, `NPU`, `GPU`, or `CPU`. |
+| `ASR_PREPROCESS_DEVICE` | `AUTO` | Inference target: `AUTO`, `NPU`, `GPU`, or `CPU`. AUTO uses the next available Intel accelerator reported by OpenVINO and falls back to CPU when needed. |
 | `ASR_MODEL` | `Systran/faster-whisper-large-v3` | Model ID (HuggingFace) or local path. |
 | `ASR_ENGINE` | `FASTER-WHISPER` | Selects ASR backend engine. Options: `AUTO`, `FASTER-WHISPER`, `INTEL-WHISPER`, `OPENAI-WHISPER`, `WHISPERX`. Invalid values fail startup. |
 | `VOCAL_SEPARATION_MODEL` | `UVR-MDX-NET-Voc_FT` | Model ID (HuggingFace) or local path |
@@ -208,7 +224,7 @@ The service is highly tunable via environment variables in `docker-compose.yml`.
 | `ASR_BEAM_SIZE` | `5` | Decoding beam width (Search depth). |
 | `DEBUG` | `false` | Enables verbose stack traces and debug logging. |
 | **Diarization** | | |
-| `HF_TOKEN` | *(empty)* | Hugging Face token for speaker diarization (PyAnnote models). |
+| `DIARIZATION_HF_TOKEN` | *(empty)* | Hugging Face token for speaker diarization (PyAnnote models). |
 | **Transcription Tuning** | | |
 | `INITIAL_PROMPT` | *(multilingual)* | Default context prompt to guide Whisper transcription. |
 | `MODEL_IDLE_TIMEOUT` | `300` | Seconds to keep models loaded after last task (0 = immediate offload). |
@@ -276,10 +292,14 @@ services:
     # To enable hardware passthrough, uncomment the appropriate sections below.
  
     # 1. Intel Silicon (iGPU / NPU) - Used for Preprocessing
+    # Linux Intel hosts:
     # devices:
-    #   - /dev/dri:/dev/dri # Integrated GPU
-    #   - /dev/accel/accel0:/dev/accel/accel0 # Meteor/Lunar Lake NPU
-    #   - /dev/dxg:/dev/dxg # Windows/WSL2 GPU mapping
+    #   - /dev/dri:/dev/dri # Integrated GPU / Arc (all render nodes)
+    #   - /dev/accel:/dev/accel # Meteor/Lunar Lake NPU (all accel nodes)
+    # Windows 11 / WSL2 Intel hosts:
+    #   - /dev/dxg:/dev/dxg # WSL GPU bridge
+    #   - /dev/dri:/dev/dri # Optional if WSL exposes DRM render nodes
+    #   - /dev/accel:/dev/accel # Optional if WSL exposes Intel NPU accel nodes
  
     # 2. NVIDIA Silicon (CUDA)
     # Note: Requires NVIDIA Container Toolkit on the HOST for driver passthrough.
@@ -367,7 +387,7 @@ Performs multi-zone analysis to identify source language metadata. Returns full 
 Main entry point for generating subtitles with optional speaker diarization.
 
 - **Formats**: `srt` (default), `vtt`, `txt`, `tsv`, `json` (with segments).
-- **Diarization**: Add `diarize=true` to enable speaker identification (requires `HF_TOKEN`).
+- **Diarization**: Add `diarize=true` to enable speaker identification (requires `DIARIZATION_HF_TOKEN` or request `hf_token`).
 - **ASR Tuning**: `initial_prompt`, `vad_filter`, `word_timestamps` for fine-grained control.
 - **Subtitle Layout**: `max_line_width` and `max_line_count` for custom subtitle formatting.
 - **Word Highlighting**: `subtitle_highlight_words=true` highlights the active spoken word in SRT/VTT output.
@@ -420,18 +440,39 @@ To use this service with **Bazarr**:
 ├── whisper_pro_asr.py        # Master entry point
 ├── modules/                 # Service Logic
 │   ├── bootstrap.py         # Hardware path patching & library redirection
-│   ├── api/                 # API Routes
-│   │   ├── routes_asr.py    # /asr, /v1/audio/transcriptions, /v1/audio/translations
-│   │   ├── routes_detect.py # /detect-language
-│   │   ├── routes_system.py # /dashboard, /status, /settings, /analytics, /history
-│   │   └── routes_utils.py  # Shared request utilities & file handling
+│   ├── api/                 # API Layer
+│   │   ├── routes/          # Endpoint modules
+│   │   │   ├── asr.py       # /asr, /v1/audio/transcriptions, /v1/audio/translations
+│   │   │   ├── detect.py    # /detect-language
+│   │   │   └── system.py    # /dashboard, /status, /settings, /analytics, /history
+│   │   └── support/         # Shared route helpers
+│   │       ├── request_utils.py
+│   │       ├── upload_extraction.py
+│   │       └── local_path.py
 │   ├── inference/           # ML Engine
-│   │   ├── model_manager.py # Model pool, transcription, diarization, idle monitoring
-│   │   ├── scheduler.py     # Re-entrant locks & hardware orchestration
-│   │   ├── language_detection.py  # Batch language identification pipeline
-│   │   ├── preprocessing.py # UVR vocal separation
-│   │   ├── vad.py           # Voice Activity Detection
-│   │   └── intel_engine.py  # Intel NPU/GPU engine adapter
+│   │   ├── runtime/         # Orchestration and lifecycle
+│   │   │   ├── model_manager.py
+│   │   │   ├── model_segment_processing.py
+│   │   │   └── concurrency.py
+│   │   ├── scheduler/       # Scheduling state and policies
+│   │   │   ├── __init__.py
+│   │   │   ├── state_helpers.py
+│   │   │   ├── task_helpers.py
+│   │   │   └── ordering.py
+│   │   ├── pipeline/        # Audio and transcript pipeline stages
+│   │   │   ├── preprocessing.py
+│   │   │   ├── vad.py
+│   │   │   ├── language_detection.py
+│   │   │   ├── language_detection_core.py
+│   │   │   ├── diarization.py
+│   │   │   └── post_processing.py
+│   │   └── engines/         # Backend-specific ASR engines
+│   │       ├── base.py
+│   │       ├── engine_factory.py
+│   │       ├── faster_whisper_engine.py
+│   │       ├── openai_whisper_engine.py
+│   │       ├── intel_engine.py
+│   │       └── whisperx_engine.py
 │   ├── monitoring/          # Dashboard, Telemetry & Metrics
 │   │   ├── dashboard.py     # Dashboard entry point
 │   │   ├── dashboard_ui.py  # Material Design dashboard renderer (loads from templates)
@@ -439,18 +480,29 @@ To use this service with **Bazarr**:
 │   │   ├── templates/       # HTML, CSS, and JS dashboard/analytics templates
 │   │   │   ├── dashboard.html
 │   │   │   ├── dashboard.css
-│   │   │   ├── dashboard_charts.js
-│   │   │   ├── dashboard_main.js
-│   │   │   ├── dashboard_state.js
-│   │   │   ├── dashboard_utils.js
+│   │   │   ├── dashboard_js_files.txt
+│   │   │   ├── dashboard/
+│   │   │   │   ├── core/
+│   │   │   │   │   ├── state.js
+│   │   │   │   │   └── utils.js
+│   │   │   │   ├── main.js
+│   │   │   │   └── features/
+│   │   │   │       ├── charts.js
+│   │   │   │       ├── audit.js
+│   │   │   │       ├── task_filter_history.js
+│   │   │   │       ├── speed_status.js
+│   │   │   │       ├── runtime.js
+│   │   │   │       └── active_tasks.js
 │   │   │   ├── analytics.html
 │   │   │   ├── analytics.css
-│   │   │   └── analytics.js
+│   │   │   ├── analytics_js_files.txt
+│   │   │   └── analytics/
+│   │   │       └── main.js
 │   │   ├── telemetry.py     # Real-time telemetry collection
 │   │   ├── telemetry_manager.py  # Persistent telemetry history
 │   │   ├── history_manager.py    # Task history (dual-tier storage)
 │   │   └── metrics_discovery.py  # Hardware metrics detection
-│   ├── config.py            # Global Settings (HF_TOKEN, MODEL_IDLE_TIMEOUT, etc.)
+│   ├── config.py            # Global Settings (DIARIZATION_HF_TOKEN, MODEL_IDLE_TIMEOUT, etc.)
 │   ├── logging_setup.py     # Task-specific Logging
 │   └── utils.py             # System & Audio Utilities (subtitle wrapping, speaker labels)
 ├── tests/                   # Performance & Unit Test Suites

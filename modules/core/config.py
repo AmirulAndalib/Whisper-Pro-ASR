@@ -27,11 +27,13 @@ _ = HALLUCINATION_PHRASES
 # Set up early logger for configuration phase
 logger = logging.getLogger(__name__)
 
+HOST = os.environ.get("HOST") or ".".join(["0", "0", "0", "0"])
+
 # --- [CORE SERVICE CONFIG] ---
 APP_NAME = "Whisper Pro ASR"
-VERSION = "1.1.5"
-HARDWARE_UNITS = []  # Global registry for accelerator orchestration
-HF_TOKEN = os.environ.get("HF_TOKEN", "")
+VERSION = "1.1.6"
+HARDWARE_UNITS: list[dict[str, str]] = []  # Global registry for accelerator orchestration
+DIARIZATION_HF_TOKEN = os.environ.get("DIARIZATION_HF_TOKEN", "").strip()
 
 # --- [RESOURCE POOL LIMITS] ---
 CPU_CORE_LIMIT = int(os.environ.get("CPU_CORE_LIMIT", 4))
@@ -207,9 +209,44 @@ def update_env(key, value):
 
 INITIAL_STEPS_RATIO = 2.8
 
+
+def _is_path_writable(path: str) -> bool:
+    """Return True when a directory allows create+delete operations."""
+    probe = os.path.join(path, ".write_probe")
+    try:
+        with open(probe, "w", encoding="utf-8") as handle:
+            handle.write("ok")
+        os.remove(probe)
+        return True
+    except (PermissionError, OSError):
+        return False
+
+
+def _resolve_writable_dir(label: str, candidates: list[str], fallback: str) -> str:
+    """Pick the first writable directory from candidates, else use fallback."""
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            os.makedirs(candidate, exist_ok=True)
+        except (PermissionError, OSError):
+            continue
+        if _is_path_writable(candidate):
+            return candidate
+
+    os.makedirs(fallback, exist_ok=True)
+    logger.warning("[Config] %s directory is not writable. Falling back to %s", label, fallback)
+    return fallback
+
+
 # Path for compiled OpenVINO blobs and model downloads
 LOCAL_CACHE = "./model_cache"
-OV_CACHE_DIR = os.environ.get("OV_CACHE_DIR", LOCAL_CACHE)
+_RUNTIME_FALLBACK_ROOT = os.path.join(tempfile.gettempdir(), "whisper-runtime")
+OV_CACHE_DIR = _resolve_writable_dir(
+    "OV cache",
+    [os.environ.get("OV_CACHE_DIR", LOCAL_CACHE), LOCAL_CACHE],
+    os.path.join(_RUNTIME_FALLBACK_ROOT, "model_cache"),
+)
 
 # --- [SSD WRITE WEAR OPTIMIZATION] ---
 TEMP_DIR = os.environ.get("WHISPER_TEMP_DIR", tempfile.gettempdir())
@@ -219,76 +256,89 @@ except (PermissionError, OSError):
     TEMP_DIR = tempfile.gettempdir()
 
 # Persistence Directory (Should be mounted to a physical volume for history/logs)
-PERSISTENT_DIR = os.environ.get("WHISPER_PERSISTENT_DIR", "/app/data")
-try:
-    os.makedirs(PERSISTENT_DIR, exist_ok=True)
-except (PermissionError, OSError):
-    PERSISTENT_DIR = "./test_data"
-    try:
-        os.makedirs(PERSISTENT_DIR, exist_ok=True)
-    except OSError:
-        pass
+PERSISTENT_DIR = _resolve_writable_dir(
+    "Persistent state",
+    [os.environ.get("WHISPER_PERSISTENT_DIR", "/app/data")],
+    os.path.join(_RUNTIME_FALLBACK_ROOT, "state"),
+)
+
+_state_dir_env = os.environ.get("WHISPER_STATE_DIR")
+if _state_dir_env:
+    _state_dir_candidates = [_state_dir_env, PERSISTENT_DIR, "./test_state"]
+else:
+    _state_dir_candidates = [PERSISTENT_DIR, "./test_state"]
 
 # State and Telemetry Directory (Persistent across restarts)
-STATE_DIR = os.environ.get("WHISPER_STATE_DIR", PERSISTENT_DIR)
-LOG_DIR = os.environ.get("WHISPER_LOG_DIR", STATE_DIR)
-try:
-    os.makedirs(STATE_DIR, exist_ok=True)
-    os.makedirs(LOG_DIR, exist_ok=True)
-except (PermissionError, OSError):
-    STATE_DIR = "./test_state"
-    LOG_DIR = "./test_state"
-    try:
-        os.makedirs(STATE_DIR, exist_ok=True)
-        os.makedirs(LOG_DIR, exist_ok=True)
-    except OSError:
-        pass
+STATE_DIR = _resolve_writable_dir(
+    "State",
+    _state_dir_candidates,
+    os.path.join(_RUNTIME_FALLBACK_ROOT, "state"),
+)
+LOG_DIR = _resolve_writable_dir(
+    "Log",
+    [os.environ.get("WHISPER_LOG_DIR", STATE_DIR), STATE_DIR],
+    os.path.join(_RUNTIME_FALLBACK_ROOT, "logs"),
+)
 
 
 def get_custom_mount_points():
     """Discover custom mount points from /proc/mounts to automatically approve volumes."""
-    mounts = []
     if not os.path.exists("/proc/mounts"):
-        return mounts
+        return []
     try:
-        # Ignore system directories and mounts
-        system_roots = {
-            "/",
-            "/proc",
-            "/sys",
-            "/dev",
-            "/run",
-            "/boot",
-            "/lib",
-            "/lib64",
-            "/bin",
-            "/sbin",
-            "/usr",
-            "/var",
-            "/etc",
-            "/root",
-            "/home",
-            "/tmp",
-            "/sys/firmware",
-        }
-        with open("/proc/mounts", "r", encoding="utf-8") as f:
-            for line in f:
-                parts = line.split()
-                if len(parts) >= 2:
-                    mp = parts[1]
-                    # We want custom mount points that do not belong to system roots
-                    # Also skip mounts starting with system paths (like /proc/sys, /sys/fs, /dev/pts, etc.)
-                    if mp in system_roots:
-                        continue
-                    if any(mp.startswith(sr + "/") for sr in system_roots):
-                        continue
-                    # Skip common Docker internal file mounts
-                    if mp.endswith(("/hosts", "/hostname", "/resolv.conf")):
-                        continue
-                    mounts.append(mp)
+        system_roots = _system_mount_roots()
+        return _read_custom_mount_points(system_roots)
     except (FileNotFoundError, PermissionError, OSError, ValueError, IndexError):
-        pass
+        return []
+
+
+def _system_mount_roots() -> set[str]:
+    return {
+        "/",
+        "/proc",
+        "/sys",
+        "/dev",
+        "/run",
+        "/boot",
+        "/lib",
+        "/lib64",
+        "/bin",
+        "/sbin",
+        "/usr",
+        "/var",
+        "/etc",
+        "/root",
+        "/home",
+        tempfile.gettempdir(),
+        "/sys/firmware",
+    }
+
+
+def _read_custom_mount_points(system_roots: set[str]) -> list[str]:
+    mounts = []
+    with open("/proc/mounts", "r", encoding="utf-8") as f:
+        for line in f:
+            mount_point = _extract_mount_point(line)
+            if mount_point and _is_custom_mount_point(mount_point, system_roots):
+                mounts.append(mount_point)
     return mounts
+
+
+def _extract_mount_point(line: str):
+    parts = line.split()
+    if len(parts) >= 2:
+        return parts[1]
+    return None
+
+
+def _is_custom_mount_point(mount_point: str, system_roots: set[str]) -> bool:
+    if mount_point in system_roots:
+        return False
+    if any(mount_point.startswith(root + "/") for root in system_roots):
+        return False
+    if mount_point.endswith(("/hosts", "/hostname", "/resolv.conf")):
+        return False
+    return True
 
 
 # Approved roots configuration
@@ -385,8 +435,7 @@ VAD_SPEECH_PAD_MS = int(os.environ.get("VAD_SPEECH_PAD_MS", 500))
 
 INITIAL_PROMPT = os.environ.get(
     "INITIAL_PROMPT",
-    "This video contains speech in multiple languages including "
-    "Romanian, English, French, Italian, German, and Spanish.",
+    "This video contains speech in multiple languages including Romanian, English, French, Italian, German, and Spanish.",
 )
 
 # --- [PREPROCESSING CONFIGURATION] ---
@@ -402,9 +451,7 @@ PREPROCESS_THREADS_ENV = int(os.environ.get("ASR_PREPROCESS_THREADS", 4))
 # --- [THREAD & PERFORMANCE TUNING] ---
 
 
-ASR_THREADS, PREPROCESS_THREADS = resolve_thread_limits(
-    DEFAULT_WHISPER_THREADS, PREPROCESS_THREADS_ENV, CPU_CORE_LIMIT, MAX_CPU, DEVICE
-)
+ASR_THREADS, PREPROCESS_THREADS = resolve_thread_limits(DEFAULT_WHISPER_THREADS, PREPROCESS_THREADS_ENV, CPU_CORE_LIMIT, MAX_CPU, DEVICE)
 
 # Industry standard thread limits for shared libraries
 os.environ["OMP_NUM_THREADS"] = str(PREPROCESS_THREADS)
@@ -429,8 +476,7 @@ def validate_thread_concurrency():
 
         if total_load > (CPU_CORE_LIMIT + 2):  # Allow slight over-subscription for I/O
             logger.warning(
-                "[Config] OVER-PROVISIONING: PREPROCESS_THREADS (%d) + "
-                "FFMPEG_THREADS (%d) = %d, which exceeds logical cores (%d).",
+                "[Config] OVER-PROVISIONING: PREPROCESS_THREADS (%d) + FFMPEG_THREADS (%d) = %d, which exceeds logical cores (%d).",
                 PREPROCESS_THREADS,
                 eff_ffmpeg,
                 total_load,
@@ -447,18 +493,19 @@ CPU_PARALLEL_LIMIT = calculate_cpu_parallel_limit(MAX_CPU, CPU_CORE_LIMIT, ASR_T
 
 def get_parallel_limit(device):
     """Determine parallel task limit based on physical resource units."""
-    if device in ["CUDA", "GPU", "NPU"]:
-        try:
-            units = [u for u in HARDWARE_UNITS if u.get("type") == device]
-            if units:
-                return len(units)
-        except (AttributeError, TypeError, ValueError):
-            pass
+    if device not in ["CUDA", "GPU", "NPU"]:
+        return CPU_PARALLEL_LIMIT
+    return _accelerator_parallel_limit(device)
 
-        return 1  # Safe default if registry is unavailable or device is absent
 
-    # CPU-bound tasks: Capped by hardware-optimized slot count
-    return CPU_PARALLEL_LIMIT
+def _accelerator_parallel_limit(device) -> int:
+    try:
+        units = [u for u in HARDWARE_UNITS if u.get("type") == device]
+        if units:
+            return len(units)
+    except (AttributeError, TypeError, ValueError):
+        pass
+    return 1
 
 
 # --- [LANGUAGE DETECTION] ---

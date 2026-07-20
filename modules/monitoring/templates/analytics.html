@@ -24,7 +24,7 @@
                 <span class="material-icons-sharp" style="font-size: 18px">dashboard</span>
                 Dashboard
             </a>
-            <button onclick="exportJson()" class="btn-action" id="btn-export">
+            <button type="button" onclick="exportJson()" class="btn-action" id="btn-export">
                 <span class="material-icons-sharp" style="font-size: 18px">download</span>
                 Export Data
             </button>
@@ -95,12 +95,12 @@
                 <table id="daily-table">
                     <thead>
                         <tr>
-                            <th>Date</th>
-                            <th>Total Tasks</th>
-                            <th>/asr</th>
-                            <th>/detect-language</th>
-                            <th>/v1/audio/...</th>
-                            <th>Total Duration</th>
+                            <th scope="col">Date</th>
+                            <th scope="col">Total Tasks</th>
+                            <th scope="col">/asr</th>
+                            <th scope="col">/detect-language</th>
+                            <th scope="col">/v1/audio/...</th>
+                            <th scope="col">Total Duration</th>
                         </tr>
                     </thead>
                     <tbody id="table-body">

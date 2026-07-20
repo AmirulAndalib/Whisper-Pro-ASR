@@ -24,8 +24,8 @@ Preserve the intended policy:
 ## Validation Commands
 
 ```bash
-.venv/bin/python -m pytest tests/inference/priority/test_priority_concurrency.py tests/inference/priority/test_priority_fifo_ordering.py -q
-.venv/bin/python -m pytest tests/inference/test_scheduler.py -q
+.venv/bin/python -m pytest tests/inference/scheduler/priority/test_priority_concurrency.py tests/inference/scheduler/priority/test_priority_concurrency_core_tests.py tests/inference/scheduler/priority/test_priority_concurrency_extended_tests.py tests/inference/scheduler/priority/test_priority_fifo_ordering.py tests/inference/scheduler/priority/test_priority_fifo_ordering_regressions.py -q
+.venv/bin/python -m pytest tests/inference/scheduler/test_scheduler.py tests/inference/scheduler/test_scheduler_priority_and_fifo.py tests/inference/scheduler/test_scheduler_pause_and_metadata.py -q
 ```
 
 ## Done Criteria
@@ -34,3 +34,4 @@ Preserve the intended policy:
 - No deadlocks/timeouts under bursty mixed workloads.
 - Multi-accelerator detect-language bursts prove the scheduler does not collapse to one priority task at a time.
 - Stage-aware preemption tests confirm pre-vocal and pre-inference ASR yield checkpoints.
+

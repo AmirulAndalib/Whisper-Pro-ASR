@@ -1,62 +1,103 @@
 # Stage 1: Base - Install system dependencies
+FROM hadolint/hadolint:v2.12.0-debian AS hadolint-bin
+FROM koalaman/shellcheck:v0.10.0 AS shellcheck-bin
+FROM rhysd/actionlint:1.7.7 AS actionlint-bin
+FROM mvdan/shfmt:v3.10.0 AS shfmt-bin
+FROM zricethezav/gitleaks:v8.23.1 AS gitleaks-bin
+FROM mcr.microsoft.com/powershell:7.5-ubuntu-22.04 AS powershell-bin
+
 FROM python:3.12-slim AS base
 
-USER root
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 ENV PYTHONUNBUFFERED=1
+
+ARG POETRY_VERSION=2.3.4
+ARG PIP_VERSION=26.1.2
+ARG FFMPEG_VERSION=8.1.2
+ARG FFMPEG_TARBALL=ffmpeg-${FFMPEG_VERSION}.tar.xz
+ARG FFMPEG_URL=https://ffmpeg.org/releases/${FFMPEG_TARBALL}
+ARG FFMPEG_SIG_URL=${FFMPEG_URL}.asc
+ARG PSSCRIPTANALYZER_VERSION=1.25.0
+
+# Install Node.js from the official node image
+COPY --from=node:22-slim /usr/local/ /usr/local/
 
 # Install system dependencies (cached)
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y ffmpeg git build-essential nodejs npm
+    apt-get update && apt-get install -y --no-install-recommends \
+    wget=* \
+    gnupg=* \
+    libicu-dev=* \
+    xz-utils=* \
+    build-essential=* \
+    nasm=* \
+    pkg-config=* \
+    git=* \
+    && wget --progress=dot:giga -O /tmp/ffmpeg.tar.xz "${FFMPEG_URL}" \
+    && wget --progress=dot:giga -O /tmp/ffmpeg.tar.xz.asc "${FFMPEG_SIG_URL}" \
+    && wget --progress=dot:giga -O /tmp/ffmpeg-devel.asc https://ffmpeg.org/ffmpeg-devel.asc \
+    && gpg --batch --import /tmp/ffmpeg-devel.asc \
+    && gpg --batch --verify /tmp/ffmpeg.tar.xz.asc /tmp/ffmpeg.tar.xz \
+    && tar -xf /tmp/ffmpeg.tar.xz -C /tmp
+
+WORKDIR /tmp/ffmpeg-${FFMPEG_VERSION}
+
+RUN ./configure --prefix=/usr/local --disable-debug --disable-doc --disable-static --enable-shared --enable-pic \
+    && make -j"$(nproc)" \
+    && make install \
+    && ldconfig \
+    && ffmpeg -version \
+    && ffprobe -version \
+    && rm -rf /tmp/ffmpeg* /root/.gnupg \
+    && rm -rf /var/lib/apt/lists/*
 
 # Set working directory early
+WORKDIR /
+
 WORKDIR /app
 
 # Copy only the dependency definition files first (pyproject.toml, poetry.lock, pip.conf)
 COPY pip.conf /etc/pip.conf
 COPY pyproject.toml poetry.lock* ./
+COPY --from=hadolint-bin /bin/hadolint /usr/local/bin/hadolint
+COPY --from=shellcheck-bin /bin/shellcheck /usr/local/bin/shellcheck
+COPY --from=actionlint-bin /usr/local/bin/actionlint /usr/local/bin/actionlint
+COPY --from=shfmt-bin /bin/shfmt /usr/local/bin/shfmt
+COPY --from=gitleaks-bin /usr/bin/gitleaks /usr/local/bin/gitleaks
+COPY --from=powershell-bin /opt/microsoft/powershell/7 /opt/microsoft/powershell/7
+
+RUN ln -sf /opt/microsoft/powershell/7/pwsh /usr/local/bin/pwsh
+
+# Keep pip resolver behavior aligned with production image.
+RUN python -m pip install --no-cache-dir "pip==${PIP_VERSION}"
 
 # Install Poetry and project dependencies (using cache mount for pip/poetry caches)
-RUN --mount=type=cache,target=/root/.cache \
-    pip install poetry "setuptools==80.9.0" && \
+RUN --mount=type=cache,id=whisper-pro-asr-poetry,target=/root/.cache/pypoetry,sharing=locked \
+    python -m pip install --no-cache-dir "poetry==${POETRY_VERSION}" "setuptools==83.0.0" && \
     poetry config virtualenvs.create false && \
     poetry config installer.max-workers 1 && \
-    poetry install --no-root --without ml && \
-    PYTHONWARNINGS="ignore::DeprecationWarning" python -c "import coverage_badge, pkg_resources"
+    poetry config cache-dir /root/.cache/pypoetry && \
+    poetry install --no-root
 
 
-# Stage 2: Lint - Run static analysis (cached by Docker)
-FROM base AS lint
-# Copy the rest of the source code (cached after deps are installed)
-COPY . .
-RUN set -eux && \
-    echo "--- Installing Node-based lint dependencies (cached) ---" && \
-    npm ci && \
-    echo "--- Running Markdownlint (verbose) ---" && \
-    npm run lint:md && \
-    echo "--- Running Yamllint (verbose) ---" && \
-    yamllint -f parsable -c .yamllint . && \
-    echo "--- Running Ruff Format Check (verbose) ---" && \
-    ruff format --check -v . && \
-    echo "--- Running Ruff Lint Check (verbose) ---" && \
-    ruff check -v . && \
-    echo "--- Running Flake8 (verbose) ---" && \
-    flake8 -v modules whisper_pro_asr.py tests tests/check_coverage.py && \
-    echo "--- Running Pylint (verbose) ---" && \
-    pylint -v modules whisper_pro_asr.py tests tests/check_coverage.py
-
-# Stage 3: Test - Final image for running integration tests
+# Stage 2: Test - Final image for running all quality gates and tests
 FROM base AS test
 ENV POETRY_HTTP_TIMEOUT=1800
 ENV PIP_DEFAULT_TIMEOUT=1800
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 # Copy frontend dependency manifests first so npm install is source-change resistant.
 COPY package.json package-lock.json ./
 
 # Install frontend and markdown tooling dependencies used by quality gates executed inside tests/run_suite.sh
-RUN --mount=type=cache,target=/root/.npm \
+RUN --mount=type=cache,id=whisper-pro-asr-npm,target=/root/.npm,sharing=locked \
+    --mount=type=cache,id=whisper-pro-asr-playwright,target=/var/cache/ms-playwright,sharing=locked \
     npm ci && \
-    npx playwright install --with-deps chromium
+    pwsh -NoLogo -NoProfile -Command "Set-PSRepository -Name PSGallery -InstallationPolicy Trusted; Install-Module -Name PSScriptAnalyzer -RequiredVersion ${PSSCRIPTANALYZER_VERSION} -Scope AllUsers -Force -AllowClobber" && \
+    PLAYWRIGHT_BROWSERS_PATH=/var/cache/ms-playwright npx playwright install --with-deps chromium && \
+    mkdir -p /ms-playwright && cp -a /var/cache/ms-playwright/. /ms-playwright/
 
 # Copy the rest of the source code after dependency layers.
 COPY . .

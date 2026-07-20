@@ -38,23 +38,22 @@ jobs:
         run: |
           docker run --rm \
             -u "$(id -u):$(id -g)" \
-            -v "$PWD:/workspace" \
+            -v "$PWD/pyproject.toml:/workspace/pyproject.toml" \
+            -v "$PWD/poetry.lock:/workspace/poetry.lock" \
             -w /workspace \
             python:3.12-slim \
-            /bin/bash -lc "export HOME=/tmp && python -m pip install --quiet --user poetry && if [ ! -f poetry.lock ] || ! python -m poetry check --lock; then echo 'poetry.lock is missing or out of sync. Please run poetry lock locally and commit the changes.' && exit 1; fi"
+            /bin/bash -lc '
+              export HOME=/tmp
+              python -m pip install --quiet --user poetry==2.4.1
+              python -m poetry config virtualenvs.create false
+              if [ ! -f poetry.lock ] || ! python -m poetry check --lock; then
+                echo "poetry.lock is missing or out of sync. Please run poetry lock locally and commit the changes."
+                exit 1
+              fi
+            '
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
-
-      - name: Run Static Analysis (Linting)
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: Dockerfile.test
-          target: lint
-          load: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       - name: Prepare Test Environment (Docker)
         uses: docker/build-push-action@v7
@@ -64,39 +63,61 @@ jobs:
           target: test
           load: true
           tags: whisper-pro-asr-test
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=whisper-pro-asr-test
+          cache-to: type=gha,mode=max,scope=whisper-pro-asr-test
 
       - name: Orchestrate Test Suite (Integration)
         run: |
-          mkdir -p assets
+          mkdir -p assets reports
+          chmod 0777 assets reports
           docker run --rm \
             -e CI=true \
-            -v $PWD/assets:/app/assets \
-            -v $PWD:/reports \
-            whisper-pro-asr-test /bin/bash -c "tests/run_suite.sh && \
-              cp coverage.xml /reports/coverage.xml && \
-              cp coverage_output.txt /reports/coverage_output.txt && \
-              cp complexity_output.txt /reports/complexity_output.txt && \
-              cp pytest.xml /reports/pytest.xml"
+            -v "$PWD/assets:/app/assets" \
+            -v "$PWD/reports:/reports" \
+            whisper-pro-asr-test /bin/bash -c "tests/run_suite.sh; TEST_EXIT_CODE=\$?; \
+              [ -f coverage.xml ] && cp coverage.xml /reports/coverage.xml || true; \
+              [ -f coverage_output.txt ] && cp coverage_output.txt /reports/coverage_output.txt || true; \
+              [ -f complexity_output.txt ] && cp complexity_output.txt /reports/complexity_output.txt || true; \
+              [ -f pytest.xml ] && cp pytest.xml /reports/pytest.xml || true; \
+              exit \$TEST_EXIT_CODE"
 
       - name: Export Coverage & Complexity to Job Summary
+        if: success() || failure()
         run: |
-          echo "### Code Coverage Summary" >> $GITHUB_STEP_SUMMARY
-          echo '```text' >> $GITHUB_STEP_SUMMARY
-          # Extract the summary table part from pytest-cov output
-          sed -n '/---------- coverage/,/TOTAL/p' coverage_output.txt >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "### Cyclomatic Complexity Summary" >> $GITHUB_STEP_SUMMARY
-          echo '```text' >> $GITHUB_STEP_SUMMARY
-          cat complexity_output.txt >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          {
+            echo "### Code Coverage Summary"
+            echo '```text'
+            if [ -f reports/coverage_output.txt ]; then
+              # Extract coverage report summary
+              if grep -q "^------.*coverage" reports/coverage_output.txt; then
+                sed -n '/^------.*coverage/,/^TOTAL/p' \
+                  reports/coverage_output.txt
+              else
+                # Fallback: show last 30 lines containing coverage data
+                tail -30 reports/coverage_output.txt | grep -E \
+                  '(py$|TOTAL|^-+$)' || tail -30 \
+                  reports/coverage_output.txt
+              fi
+            else
+              echo "reports/coverage_output.txt not found"
+            fi
+            echo '```'
+            echo "### Cyclomatic Complexity Summary"
+            echo '```text'
+            if [ -f reports/complexity_output.txt ]; then
+              cat reports/complexity_output.txt
+            else
+              echo "reports/complexity_output.txt not found"
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Generate PR Coverage Comment
+        if: success() || failure()
         uses: MishaKav/pytest-coverage-comment@v1
         with:
-          pytest-coverage-path: ./coverage_output.txt
-          junitxml-path: ./pytest.xml
+          pytest-coverage-path: ./reports/coverage_output.txt
+          junitxml-path: ./reports/pytest.xml
 
       - name: Resolve Docker Metadata & Tags
         id: meta
@@ -130,8 +151,10 @@ jobs:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: |
+            type=gha,scope=whisper-pro-asr-test
+            type=gha,scope=whisper-pro-asr-production
+          cache-to: type=gha,mode=max,scope=whisper-pro-asr-production
           labels: |
             org.opencontainers.image.source=${{ github.event.repository.html_url }}
             org.opencontainers.image.revision=${{ github.sha }}

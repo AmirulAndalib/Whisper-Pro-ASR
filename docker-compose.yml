@@ -1,9 +1,19 @@
 ---
 services:
   whisper-pro-asr:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Persist BuildKit cache across docker compose builds (especially useful on Windows/WSL2).
+      cache_from:
+        - type=local,src=.buildx-cache
+      cache_to:
+        - type=local,dest=.buildx-cache,mode=max
     container_name: whisper-pro-asr
     restart: unless-stopped
+    # Optional: run container as host user/group.
+    # Ensure bind mounts (./data, ./model_cache) are writable by USER_ID:GROUP_ID before startup.
+    user: "${USER_ID:-1000}:${GROUP_ID:-1000}"
     ports:
       - "9000:9000"
 
@@ -17,10 +27,17 @@ services:
           cpus: '4.0'
 
     # 1. Intel NPU / iGPU / Arc
+    # Linux Intel hosts:
+    # group_add:
+    #   - "991"  # Intel render/accel group on Linux hosts
     # devices:
-    #   - /dev/dri:/dev/dri  # Integrated GPU
-    #   - /dev/accel/accel0:/dev/accel/accel0  # Meteor/Lunar Lake NPU
-    #   - /dev/dxg:/dev/dxg  # Windows/WSL2 GPU mapping
+    #   - /dev/dri:/dev/dri  # Map all Intel GPU render nodes (multi-GPU safe)
+    #   - /dev/accel:/dev/accel  # Map all Intel NPU accel nodes (multi-NPU safe)
+    # Windows 11 / WSL2 Intel hosts:
+    # devices:
+    #   - /dev/dxg:/dev/dxg  # WSL GPU bridge required for Intel/NVIDIA GPU visibility
+    #   - /dev/dri:/dev/dri  # Optional when WSL exposes DRM render nodes
+    #   - /dev/accel:/dev/accel  # Optional when WSL exposes Intel NPU accel nodes
 
     # 2. NVIDIA Silicon (CUDA)
     # Note: Requires NVIDIA Container Toolkit on the HOST for driver passthrough.
@@ -33,7 +50,21 @@ services:
     #           capabilities: [gpu]
 
     environment:
+      # Optional: host timezone and identity mapping overrides (set in .env or shell environment).
+      - TZ=${TZ:-UTC}
+      - USER_ID=${USER_ID:-1000}
+      - GROUP_ID=${GROUP_ID:-1000}
       - DEBUG=false
+      # NVIDIA runtime hints (safe on non-NVIDIA hosts; used when NVIDIA toolkit is present).
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+      - NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
+      # Intel/OpenVINO runtime hints. Leave blank unless the host runtime needs explicit overrides.
+      - LIBVA_DRIVER_NAME=${LIBVA_DRIVER_NAME:-}
+      - ONEAPI_DEVICE_SELECTOR=${ONEAPI_DEVICE_SELECTOR:-}
+      - ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-}
+      - OCL_ICD_VENDORS=${OCL_ICD_VENDORS:-}
+      # Speaker diarization token (Hugging Face).
+      - DIARIZATION_HF_TOKEN=${DIARIZATION_HF_TOKEN:-}
 
       # --- [ENGINE CONFIGURATION] ---
       # Hardware Target: AUTO (Automated detection), CUDA (NVIDIA), CPU
@@ -109,6 +140,8 @@ services:
       # Redirect all transient processing files (uploads, FFmpeg output,
       # UVR stems) to RAM-backed storage. Eliminates SSD write wear.
       - WHISPER_TEMP_DIR=/tmp/whisper
+      # Ensure numba/librosa JIT cache is writable for non-root runtime user.
+      - NUMBA_CACHE_DIR=/tmp/numba-cache
       # Minimum free space (MB) in TEMP_DIR before falling back to disk.
       # Default: 2048 MB.  The service also applies a 1.5× headroom
       # multiplier on top of the estimated WAV size.  For very long
@@ -122,12 +155,13 @@ services:
     # fall back to SSD-backed persistent storage when tmpfs runs low.
     tmpfs:
       - /tmp/whisper:size=2G
+      - /tmp/numba-cache:size=128M
 
     volumes:
       # Persistent cache for AI models and pre-compiled hardware binaries (NPU)
       - ./model_cache:/app/model_cache
       # Persistent storage for task history, telemetry, and system logs
-      - ./state:/app/data
+      - ./data:/app/data
       # Recommended: Mirror your Bazarr media mappings here for instant (0-copy) local processing
       # If paths match, Whisper Pro reads files directly instead of requiring uploads.
       # - /mnt/nas/media:/media

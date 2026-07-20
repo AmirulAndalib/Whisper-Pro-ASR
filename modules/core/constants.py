@@ -48,3 +48,12 @@ HALLUCINATION_PHRASES = [
     "grazie per aver guardato",
     "non dimenticare di iscriverti",
 ]
+
+INTEL_ENV_KEYS = [
+    "INTEL_OPENVINO_DIR",
+    "LD_LIBRARY_PATH",
+    "LIBVA_DRIVER_NAME",
+    "ONEAPI_DEVICE_SELECTOR",
+    "ZE_AFFINITY_MASK",
+    "OCL_ICD_VENDORS",
+]

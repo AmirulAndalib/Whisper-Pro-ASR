@@ -12,6 +12,7 @@ Guarantee cleanup correctness and persistent-state integrity.
 2. Error paths clean partial outputs and descriptors.
 3. Persistent artifacts are limited to intended locations (`model_cache`, state/history/logs).
 4. Cleanup routines do not remove active-session artifacts.
+5. Upgrade compatibility is preserved: legacy history/analytics paths are imported into current state storage when present.
 
 ## Validation Commands
 

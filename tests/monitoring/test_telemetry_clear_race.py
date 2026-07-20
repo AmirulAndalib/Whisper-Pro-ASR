@@ -38,7 +38,7 @@ def test_telemetry_clear_race(tmp_path):
                 while not stop_event.is_set():
                     try:
                         telemetry_manager.record_snapshot(MOCK_STATS)
-                    except Exception as exc:  # noqa: BLE001 - surface thread errors in test assertion
+                    except Exception as exc:
                         errors.append(exc)
                         return
                     time.sleep(0.001)
@@ -47,7 +47,7 @@ def test_telemetry_clear_race(tmp_path):
                 while not stop_event.is_set():
                     try:
                         telemetry_manager.clear_telemetry_history()
-                    except Exception as exc:  # noqa: BLE001 - surface thread errors in test assertion
+                    except Exception as exc:
                         errors.append(exc)
                         return
                     time.sleep(0.001)

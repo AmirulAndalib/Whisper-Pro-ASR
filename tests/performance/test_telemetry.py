@@ -8,6 +8,10 @@ import pytest
 from modules.monitoring import telemetry_manager
 
 
+def _telemetry_leftovers(tmp_path):
+    return [path for path in tmp_path.glob("telemetry_*.json") if path.name != "telemetry_history.json"]
+
+
 @pytest.fixture
 def mock_telemetry_file(tmp_path):
     temp_file = tmp_path / "telemetry_history.json"
@@ -29,15 +33,24 @@ def test_record_snapshot(mock_telemetry_file):
             "memory_used_gb": 8.0,
             "app_memory_gb": 1.0,
         },
-        "telemetry": {"nvidia": [{"util": 20}], "intel_gpu_load": 10, "npu_load": 5},
+        "telemetry": {
+            "nvidia": [{"util": 20}],
+            "intel_gpu_load": 10,
+            "npu_load": 5,
+            "hardware_util": {"GPU.0": 88, "CUDA:0": 20},
+        },
     }
     telemetry_manager.record_snapshot(stats)
 
     history = telemetry_manager.get_telemetry_history()
-    assert len(history) == 1
-    assert history[0]["cpu_sys"] == 10.0
-    assert history[0]["mem_sys_gb"] == 8.0
-    assert history[0]["nvidia_util"] == [20]
+    _assert_record_snapshot_payload(history[0])
+
+
+def _assert_record_snapshot_payload(snapshot):
+    assert snapshot["cpu_sys"] == 10.0
+    assert snapshot["mem_sys_gb"] == 8.0
+    assert snapshot["nvidia_util"] == [20]
+    assert snapshot["hardware_util"] == {"GPU.0": 88, "CUDA:0": 20}
 
 
 def test_record_snapshot_pruning(mock_telemetry_file):
@@ -132,8 +145,8 @@ def test_record_snapshot_exception(mock_telemetry_file):
     stats = {}
     with pytest.raises((KeyError, TypeError)):
         telemetry_manager.record_snapshot(stats)
-    # No partial/corrupt telemetry file should remain after the failure
-    assert not mock_telemetry_file.exists() or telemetry_manager.get_telemetry_history() == []
+    assert not mock_telemetry_file.exists()
+    assert telemetry_manager.get_telemetry_history() == []
 
 
 def test_record_snapshot_atomic_write_cleanup_on_replace_error(mock_telemetry_file, tmp_path):
@@ -154,8 +167,7 @@ def test_record_snapshot_atomic_write_cleanup_on_replace_error(mock_telemetry_fi
             telemetry_manager.record_snapshot(stats)
 
     # Temporary files created for atomic writes must be cleaned on failure.
-    leftovers = [path for path in tmp_path.glob("telemetry_*.json") if path.name != "telemetry_history.json"]
-    assert leftovers == []
+    assert _telemetry_leftovers(tmp_path) == []
 
 
 @pytest.mark.parametrize("dump_error", [TypeError("bad dump"), ValueError("bad dump")])
@@ -186,5 +198,4 @@ def test_record_snapshot_atomic_write_cleanup_on_dump_error(mock_telemetry_file,
     assert telemetry_manager.get_telemetry_history() == original_history
 
     # Temporary files created for atomic writes must be cleaned on failure.
-    leftovers = [path for path in tmp_path.glob("telemetry_*.json") if path.name != "telemetry_history.json"]
-    assert leftovers == []
+    assert _telemetry_leftovers(tmp_path) == []

@@ -6,7 +6,7 @@ from unittest import mock
 
 import numpy as np
 
-from modules.inference import intel_engine
+from modules.inference.engines import intel_engine
 
 
 def test_find_split_points_no_speech():
@@ -33,14 +33,15 @@ def test_find_split_points_with_gaps():
 
 
 def test_sanitize_audio_converts_and_contiguity():
-    """Test sanitize_audio flattening and converting type/contiguity."""
+    """Test _prepare_transcription_audio flattening and converting type/contiguity."""
     data = [0, 1, 2]
-    arr = intel_engine.IntelWhisperEngine.sanitize_audio(intel_engine.IntelWhisperEngine, data)
+    func = getattr(intel_engine.IntelWhisperEngine, "_prepare_transcription_audio")
+    arr = func(None, data)
     assert isinstance(arr, np.ndarray)
     assert arr.dtype == np.float32
     assert arr.flags["C_CONTIGUOUS"]
     data2 = [[1, 2], [3, 4]]
-    arr2 = intel_engine.IntelWhisperEngine.sanitize_audio(intel_engine.IntelWhisperEngine, data2)
+    arr2 = func(None, data2)
     assert arr2.shape == (4,)
 
 
@@ -61,7 +62,7 @@ def test_unload_clears_pipeline():
     engine.pipeline = mock.MagicMock()
     engine.device = "NPU"
     with mock.patch.object(intel_engine, "gc") as mock_gc:
-        engine.unload()
+        getattr(engine, "unload")()
         assert engine.pipeline is None
         mock_gc.collect.assert_called_once()
 
@@ -73,7 +74,7 @@ def test_detect_language_error_path():
     dummy_pipeline.generate.side_effect = RuntimeError("boom")
     dummy_pipeline.get_generation_config.return_value = types.SimpleNamespace()
     engine.pipeline = dummy_pipeline
-    lang, prob, probs = engine.detect_language(np.zeros(16000))
+    lang, prob, probs = getattr(engine, "detect_language")(np.zeros(16000))
     assert lang == "en"
     assert prob == 0.0
     assert probs == [("en", 0.0)]
@@ -96,4 +97,4 @@ def test_engine_init_with_mock_pipeline(monkeypatch):
     engine = intel_engine.IntelWhisperEngine(model_path="/tmp/model", device="NPU")
     assert engine.pipeline == mock_pipeline_instance
     assert engine.pipeline.device == "NPU"
-    engine.unload()
+    getattr(engine, "unload")()

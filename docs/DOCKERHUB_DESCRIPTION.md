@@ -30,16 +30,23 @@ services:
       - WHISPER_TEMP_DIR=/tmp/whisper
       # --- [SPEAKER DIARIZATION] ---
       # Required for speaker identification. Get a token at https://huggingface.co/settings/tokens
-      # - HF_TOKEN=hf_your_token_here
+      # - DIARIZATION_HF_TOKEN=hf_your_token_here
 
     # --- [HARDWARE ACCELERATION] ---
     # The application performs automated detection of both Intel and NVIDIA hardware.
     
     # 1. Intel NPU / iGPU / Arc
+    # Linux Intel hosts:
+    # group_add:
+    #   - "991"
     # devices:
-    #   - /dev/dri:/dev/dri # Intel Integrated GPU
-    #   - /dev/accel/accel0:/dev/accel/accel0 # Meteor/Lunar Lake NPU
-    #   - /dev/dxg:/dev/dxg # Windows/WSL2 GPU mapping
+    #   - /dev/dri:/dev/dri # Intel Integrated GPU / Arc (all render nodes)
+    #   - /dev/accel:/dev/accel # Intel NPU (all accel nodes)
+    # Windows 11 / WSL2 Intel hosts:
+    # devices:
+    #   - /dev/dxg:/dev/dxg # WSL GPU bridge
+    #   - /dev/dri:/dev/dri # Optional if WSL exposes DRM render nodes
+    #   - /dev/accel:/dev/accel # Optional if WSL exposes Intel NPU accel nodes
 
     # 2. NVIDIA Silicon (CUDA)
     # deploy:
@@ -56,7 +63,7 @@ services:
       # Persistent cache for AI models, diarization models, and pre-compiled hardware binaries
       - ./model_cache:/app/model_cache
       # Persistent storage for task history, telemetry, and system logs
-      - ./state:/app/data
+      - ./data:/app/data
       # Recommended: Map your media volumes to enable instant (0-copy) local processing
       # The service will prioritize reading these files directly over network uploads.
       - /path/to/my/media:/media
@@ -140,7 +147,7 @@ To use this service with **Bazarr**:
 | **OV_CACHE_DIR** | `./model_cache` | OpenVINO kernel cache directory (highly recommended) |
 | **ASR_BEAM_SIZE** | `5` | Decoding beam width (Search depth) |
 | **ASR_PARALLEL_LIMIT_ACCEL** | `1` | Max concurrent tasks on GPU/NPU |
-| **HF_TOKEN** | *(empty)* | Hugging Face token for speaker diarization (PyAnnote models) |
+| **DIARIZATION_HF_TOKEN** | *(empty)* | Hugging Face token for speaker diarization (PyAnnote models) |
 | **MODEL_IDLE_TIMEOUT** | `300` | Seconds to keep models loaded after last task (0 = immediate offload) |
 | **INTEL_ASR_CHUNK_DURATION** | `300` | Chunk duration in seconds for Intel Whisper transcription |
 | **INITIAL_PROMPT** | *(multilingual)* | Default context prompt for guiding transcription |

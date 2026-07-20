@@ -18,7 +18,7 @@ This patch release refactors the model memory lifecycle to a deferred-timer patt
 
 ### 🧹 Static Analysis Hardening
 
-- **Zero Suppression Policy**: Removed all `# pylint: disable` comments from production code. All lint compliance is achieved through genuine code improvements (specific exception types, reduced local variable counts, clean module access patterns).
+- **Zero Suppression Policy**: Removed all pylint disable comments from production code. All lint compliance is achieved through genuine code improvements (specific exception types, reduced local variable counts, clean module access patterns).
 - **Specific Exception Handling**: Replaced broad `except Exception` blocks with targeted `RuntimeError`, `OSError`, and `ValueError` catches throughout `model_manager.py` and `routes_system.py`.
 - **Clean Import Resolution**: Resolved mock initialization ordering in `tests/conftest.py` to prevent `ImportError` during test collection when `faster_whisper` submodules are accessed.
 

@@ -8,7 +8,7 @@ from unittest import mock
 
 from fastapi.responses import JSONResponse
 
-from modules.api import routes_detect
+from modules.api.routes import detect as routes_detect
 
 
 def test_await_shared_result_handles_wrap_future_exception():
@@ -17,8 +17,8 @@ def test_await_shared_result_handles_wrap_future_exception():
     _await_shared_result = routes_detect.__dict__["_await_shared_result"]
 
     with (
-        mock.patch("modules.api.routes_detect.asyncio.wrap_future", side_effect=RuntimeError("future-error")),
-        mock.patch("modules.api.routes_detect.routes_utils.handle_error", return_value=("Error", 500)),
+        mock.patch("modules.api.routes.detect.asyncio.wrap_future", side_effect=RuntimeError("future-error")),
+        mock.patch("modules.api.routes.detect.routes_utils.handle_error", return_value=("Error", 500)),
     ):
         response = asyncio.run(_await_shared_result(shared_future))
 
@@ -40,11 +40,11 @@ def test_await_shared_result_returns_success_payload():
 
 def test_detect_language_outer_exception_handler(routes_client):
     """Top-level detect-language should map unexpected exceptions via handle_error."""
-    with mock.patch("modules.api.routes_detect.model_manager") as mock_mm:
+    with mock.patch("modules.api.routes.detect.model_manager") as mock_mm:
         mock_mm.is_engine_initialized.return_value = True
         with (
-            mock.patch("modules.api.routes_detect.routes_utils.parse_form_data", side_effect=RuntimeError("boom")),
-            mock.patch("modules.api.routes_detect.routes_utils.handle_error", return_value=("mapped", 500)),
+            mock.patch("modules.api.routes.detect.routes_utils.parse_form_data", side_effect=RuntimeError("boom")),
+            mock.patch("modules.api.routes.detect.routes_utils.handle_error", return_value=("mapped", 500)),
         ):
             response = routes_client.post("/detect-language")
 
@@ -60,10 +60,8 @@ def test_await_shared_result_with_dashboard_sync_handles_future_exception():
     _sync_wait = routes_detect.__dict__["_await_shared_result_with_dashboard_task_sync"]
 
     with (
-        mock.patch(
-            "modules.api.routes_detect.model_manager.early_task_registration", return_value=contextlib.nullcontext()
-        ),
-        mock.patch("modules.api.routes_detect.routes_utils.handle_error", return_value=("Error", 500)),
+        mock.patch("modules.api.routes.detect.model_manager.early_task_registration", return_value=contextlib.nullcontext()),
+        mock.patch("modules.api.routes.detect.routes_utils.handle_error", return_value=("Error", 500)),
     ):
         response = _sync_wait(shared_future, "local_path::/tmp/a.mp3", "a.mp3")
 
@@ -78,9 +76,7 @@ def test_await_shared_result_with_dashboard_sync_handles_error_tuple():
     shared_future.set_result((None, ("boom", 500)))
     _sync_wait = routes_detect.__dict__["_await_shared_result_with_dashboard_task_sync"]
 
-    with mock.patch(
-        "modules.api.routes_detect.model_manager.early_task_registration", return_value=contextlib.nullcontext()
-    ):
+    with mock.patch("modules.api.routes.detect.model_manager.early_task_registration", return_value=contextlib.nullcontext()):
         response = _sync_wait(shared_future, "local_path::/tmp/a.mp3", "a.mp3")
 
     assert response.status_code == 500
@@ -95,10 +91,8 @@ def test_await_shared_result_with_dashboard_sync_marks_failed_for_json_error():
     _sync_wait = routes_detect.__dict__["_await_shared_result_with_dashboard_task_sync"]
 
     with (
-        mock.patch(
-            "modules.api.routes_detect.model_manager.early_task_registration", return_value=contextlib.nullcontext()
-        ),
-        mock.patch("modules.api.routes_detect.model_manager.update_task_metadata") as mock_update,
+        mock.patch("modules.api.routes.detect.model_manager.early_task_registration", return_value=contextlib.nullcontext()),
+        mock.patch("modules.api.routes.detect.model_manager.update_task_metadata") as mock_update,
     ):
         response = _sync_wait(shared_future, "local_path::/tmp/a.mp3", "a.mp3")
 
@@ -117,5 +111,5 @@ def test_log_detection_result_handles_invalid_candidate_list():
         "performance": {},
     }
 
-    with mock.patch("modules.api.routes_detect.logger.info"):
+    with mock.patch("modules.api.routes.detect.logger.info"):
         _log_detection_result(result, 0.0)

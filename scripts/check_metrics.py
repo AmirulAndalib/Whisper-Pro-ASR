@@ -1,5 +1,5 @@
-import os
 import glob
+import os
 
 
 def find_metrics():
@@ -10,7 +10,7 @@ def find_metrics():
     print(f"GPU Busy Percent Paths: {gpu_paths}")
     for p in gpu_paths:
         try:
-            with open(p, 'r') as f:
+            with open(p, "r") as f:
                 print(f"{p}: {f.read().strip()}%")
         except:
             pass

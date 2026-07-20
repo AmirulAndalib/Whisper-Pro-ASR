@@ -27,7 +27,7 @@
                 <span class="material-icons-sharp" style="font-size: 18px">api</span>
                 Swagger UI
             </a>
-            <button id="toggle-refresh" class="btn-swagger" onclick="toggleRefresh()" style="border:none; cursor:pointer; min-width: 130px;">
+            <button type="button" id="toggle-refresh" class="btn-swagger" onclick="toggleRefresh()" style="border:none; cursor:pointer; min-width: 130px;">
                 <span class="material-icons-sharp" style="font-size: 18px" id="refresh-icon">sync</span>
                 <span id="refresh-text">Live Refresh</span>
             </button>
@@ -84,20 +84,20 @@
 
             <div id="active-section">
                 <div class="filter-row">
-                    <button class="btn-filter active-filter" onclick="filterTasks('all')" id="filter-all">All</button>
-                    <button class="btn-filter" onclick="filterTasks('asr')" id="filter-asr">/asr</button>
-                    <button class="btn-filter" onclick="filterTasks('detectlang')" id="filter-detectlang">/detect-language</button>
-                    <button class="btn-filter" onclick="filterTasks('v1')" id="filter-v1">/v1/audio/...</button>
+                    <button type="button" class="btn-filter active-filter" onclick="filterTasks('all')" id="filter-all">All</button>
+                    <button type="button" class="btn-filter" onclick="filterTasks('asr')" id="filter-asr">/asr</button>
+                    <button type="button" class="btn-filter" onclick="filterTasks('detectlang')" id="filter-detectlang">/detect-language</button>
+                    <button type="button" class="btn-filter" onclick="filterTasks('v1')" id="filter-v1">/v1/audio/...</button>
                 </div>
                 <div class="task-list" id="task-list"></div>
             </div>
 
             <div id="history-section">
                 <div class="filter-row">
-                    <button class="btn-filter active-filter" onclick="filterHistory('all')" id="hist-filter-all">All</button>
-                    <button class="btn-filter" onclick="filterHistory('asr')" id="hist-filter-asr">/asr</button>
-                    <button class="btn-filter" onclick="filterHistory('detectlang')" id="hist-filter-detectlang">/detect-language</button>
-                    <button class="btn-filter" onclick="filterHistory('v1')" id="hist-filter-v1">/v1/audio/...</button>
+                    <button type="button" class="btn-filter active-filter" onclick="filterHistory('all')" id="hist-filter-all">All</button>
+                    <button type="button" class="btn-filter" onclick="filterHistory('asr')" id="hist-filter-asr">/asr</button>
+                    <button type="button" class="btn-filter" onclick="filterHistory('detectlang')" id="hist-filter-detectlang">/detect-language</button>
+                    <button type="button" class="btn-filter" onclick="filterHistory('v1')" id="hist-filter-v1">/v1/audio/...</button>
                 </div>
                 <div class="history-list" id="history-list"></div>
             </div>
@@ -163,6 +163,7 @@
                     <div class="chart-card">
                         <div class="section-title"><span class="material-icons-sharp">memory</span> Hardware Acceleration</div>
                         <div id="hw-stats" class="chart-stats-row"></div>
+                        <div id="hw-legend" class="hw-legend"></div>
                         <div id="hwChart" class="chart-container"></div>
                     </div>
                 </div>
@@ -202,7 +203,7 @@
                             </div>
                         </div>
                         <div style="display:flex; justify-content:flex-end;">
-                            <button onclick="saveSettings()" class="btn-swagger" style="border:none; cursor:pointer; padding: 10px 40px; font-size:15px;">Save Configuration</button>
+                            <button type="button" onclick="saveSettings()" class="btn-swagger" style="border:none; cursor:pointer; padding: 10px 40px; font-size:15px;">Save Configuration</button>
                         </div>
                     </div>
                 </div>
@@ -214,14 +215,14 @@
                                 <strong style="font-size:14px; display:block; margin-bottom:4px;">Purge Task History</strong>
                                 <span style="font-size:12px; color:var(--md-sys-color-secondary);">Clear all completed/failed task logs from the database.</span>
                             </div>
-                            <button onclick="clearTaskHistory()" class="btn-swagger" style="border:none; cursor:pointer; background:var(--md-sys-color-error-container); color:var(--md-sys-color-error)">Clear History</button>
+                            <button type="button" onclick="clearTaskHistory()" class="btn-swagger" style="border:none; cursor:pointer; background:var(--md-sys-color-error-container); color:var(--md-sys-color-error)">Clear History</button>
                         </div>
                         <div style="display:flex; justify-content:space-between; align-items:center; border-top: 1px solid var(--border-color); padding-top: 16px; flex-wrap:wrap; gap:12px;">
                             <div>
                                 <strong style="font-size:14px; display:block; margin-bottom:4px;">Purge Telemetry Metrics</strong>
                                 <span style="font-size:12px; color:var(--md-sys-color-secondary);">Clear all historical system CPU/Memory charting snapshots.</span>
                             </div>
-                            <button onclick="clearTelemetryMetrics()" class="btn-swagger" style="border:none; cursor:pointer; background:var(--md-sys-color-error-container); color:var(--md-sys-color-error)">Clear Telemetry</button>
+                            <button type="button" onclick="clearTelemetryMetrics()" class="btn-swagger" style="border:none; cursor:pointer; background:var(--md-sys-color-error-container); color:var(--md-sys-color-error)">Clear Telemetry</button>
                         </div>
                     </div>
                 </div>

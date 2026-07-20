@@ -143,7 +143,7 @@ function lifecycleBasePayload(tasks, history) {
   const activeSessions = tasks.filter((t) => t.status === "active").length;
   const queuedSessions = tasks.filter((t) => t.status === "queued").length;
   return {
-    version: "1.1.5-test",
+    version: "1.1.6-test",
     active_sessions: activeSessions,
     queued_sessions: queuedSessions,
     uptime_sec: 3600,
@@ -606,7 +606,9 @@ const dashboardHtml = buildDashboardHtml();
 function buildAnalyticsHtml() {
   let html = read("analytics.html");
   const css = read("analytics.css");
-  const js = read("analytics.js");
+  const js = readManifestLines("analytics_js_files.txt")
+    .map((name) => read(name))
+    .join("\n\n");
 
   html = html.replace("/* {{ANALYTICS_CSS}} */", css);
   html = html.replace("// {{ANALYTICS_JS}}", js);
@@ -831,6 +833,5 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  // eslint-disable-next-line no-console
   console.log(`Dashboard fixture server running at http://${HOST}:${PORT}`);
 });

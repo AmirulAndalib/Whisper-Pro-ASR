@@ -1,16 +1,16 @@
-import os
-import logging
-import sys
-import torch
-import shutil
 import argparse
+import logging
+import os
+import shutil
 import subprocess
-from faster_whisper import download_model
+import sys
+
+import torch
 from audio_separator.separator import Separator
+from faster_whisper import download_model
 
 # Set up logging to stdout
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
 # Configuration
@@ -31,128 +31,51 @@ CACHE_DIR = None
 SKIP_INTEL_WHISPER = False
 
 
-def verify_ov_model(directory):
-    """Verify that the directory contains a valid OpenVINO GenAI Whisper model."""
-    if not os.path.exists(directory):
+def _cache_path(cache_name):
+    return os.path.join(CACHE_DIR, cache_name) if CACHE_DIR else None
+
+
+def _replace_directory(source_dir, target_dir):
+    if os.path.exists(target_dir):
+        shutil.rmtree(target_dir)
+    shutil.copytree(source_dir, target_dir)
+
+
+def _cache_directory(source_dir, cache_name):
+    if not CACHE_DIR:
+        return
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    cache_dir = _cache_path(cache_name)
+    if os.path.exists(cache_dir):
+        shutil.rmtree(cache_dir)
+    shutil.copytree(source_dir, cache_dir)
+
+
+def _restore_directory_from_cache(cache_name, target_dir, description, validator=None):
+    if not CACHE_DIR:
+        return False
+    cache_dir = _cache_path(cache_name)
+    if not os.path.exists(cache_dir):
+        return False
+    if validator and not validator(cache_dir):
         return False
 
-    # Critical files for OpenVINO GenAI WhisperPipeline
-    critical_patterns = [
-        "openvino_encoder_model.xml",
-        "openvino_encoder_model.bin",
-        "openvino_decoder_model.xml",
-        "openvino_decoder_model.bin"
-    ]
-
-    files = os.listdir(directory)
-    missing = [p for p in critical_patterns if p not in files]
-
-    if missing:
-        logger.warning("Model directory %s is missing critical files: %s", directory, missing)
-        return False
-
-    # Check for empty bin files (the "Empty weights data" error)
-    # The bin file for large-v3 should be > 100MB even if quantized, and ~1.5GB if FP16.
-    for f in ["openvino_encoder_model.bin", "openvino_decoder_model.bin"]:
-        fpath = os.path.join(directory, f)
-        if os.path.exists(fpath):
-            fsize = os.path.getsize(fpath)
-            if fsize < 50 * 1024 * 1024:  # Less than 50MB is definitely wrong for Large V3
-                logger.error("File %s is too small (%d bytes). Corrupted or empty.", f, fsize)
-                return False
-        else:
-            return False
-
+    logger.info("Restoring %s from cache...", description)
+    _replace_directory(cache_dir, target_dir)
     return True
 
 
-def preload_whisper():
-    # 1. CTranslate2 (Faster-Whisper)
-    logger.info("--- [1/4] Preparing Faster-Whisper Model ---")
+def _run_subprocess_command(command):
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        for line in process.stdout:
+            logger.info(line.rstrip("\n"))
+    finally:
+        process.wait()
+    return process.returncode == 0
 
-    # Idempotency check: If already present and looks okay, skip
-    if os.path.exists(os.path.join(WHISPER_DIR, "model.bin")):
-        logger.info("Faster-Whisper model already exists in %s. Skipping.", WHISPER_DIR)
-    else:
-        # Check cache first
-        if CACHE_DIR and os.path.exists(os.path.join(CACHE_DIR, "whisper")):
-            logger.info("Restoring Whisper (CT2) from cache...")
-            if os.path.exists(WHISPER_DIR):
-                shutil.rmtree(WHISPER_DIR)
-            shutil.copytree(os.path.join(CACHE_DIR, "whisper"), WHISPER_DIR)
-        else:
-            logger.info("Downloading Whisper Model (CT2): %s to %s...", WHISPER_ID, WHISPER_DIR)
-            try:
-                download_model(WHISPER_ID, output_dir=WHISPER_DIR)
-                logger.info("Whisper (CT2) downloaded successfully.")
-                if CACHE_DIR:
-                    os.makedirs(CACHE_DIR, exist_ok=True)
-                    cache_path = os.path.join(CACHE_DIR, "whisper")
-                    if os.path.exists(cache_path):
-                        shutil.rmtree(cache_path)
-                    shutil.copytree(WHISPER_DIR, cache_path)
-            except Exception as e:
-                logger.error("Failed to download Whisper model: %s", e)
-                sys.exit(1)
 
-    # 2. OpenVINO (Intel-Whisper)
-    logger.info("--- [2/4] Preparing OpenVINO Whisper Model ---")
-
-    if SKIP_INTEL_WHISPER:
-        logger.info("Intel Whisper preloading is disabled via flag. Skipping.")
-        return
-
-    # Idempotency check
-    if verify_ov_model(OV_WHISPER_DIR):
-        logger.info("OpenVINO Whisper model already exists and is valid. Skipping.")
-        return
-
-    # Check cache first
-    if CACHE_DIR and os.path.exists(os.path.join(CACHE_DIR, "whisper-openvino")):
-        if verify_ov_model(os.path.join(CACHE_DIR, "whisper-openvino")):
-            logger.info("Restoring Whisper (OpenVINO) from cache...")
-            if os.path.exists(OV_WHISPER_DIR):
-                shutil.rmtree(OV_WHISPER_DIR)
-            shutil.copytree(os.path.join(CACHE_DIR, "whisper-openvino"), OV_WHISPER_DIR)
-            return
-
-    # Attempt export if optimum-cli is available
-    if shutil.which("optimum-cli"):
-        logger.info("Exporting Whisper Model to OpenVINO using optimum-cli...")
-        try:
-            source_id = "openai/whisper-large-v3"
-            cmd = [
-                "optimum-cli", "export", "openvino",
-                "--model", source_id,
-                "--task", "automatic-speech-recognition",
-                "--weight-format", "fp16",  # FP16 is safer for build
-                OV_WHISPER_DIR
-            ]
-
-            logger.info("Running: %s", " ".join(cmd))
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                       stderr=subprocess.STDOUT, text=True)
-            for line in process.stdout:
-                print(line, end="")
-            process.wait()
-
-            if process.returncode == 0 and verify_ov_model(OV_WHISPER_DIR):
-                logger.info("Whisper (OpenVINO) exported successfully.")
-                if CACHE_DIR:
-                    os.makedirs(CACHE_DIR, exist_ok=True)
-                    cache_path = os.path.join(CACHE_DIR, "whisper-openvino")
-                    if os.path.exists(cache_path):
-                        shutil.rmtree(cache_path)
-                    shutil.copytree(OV_WHISPER_DIR, cache_path)
-                return
-            else:
-                logger.warning("Optimum export failed or produced invalid model files.")
-        except Exception as e:
-            logger.warning("Exception during optimum export: %s", e)
-    else:
-        logger.info("optimum-cli not found. Skipping build-time conversion.")
-
-    # Approach: Download the original OpenAI weights for Intel conversion
+def _download_openvino_source():
     logger.info("Downloading official OpenAI Whisper weights for Intel conversion: %s", OV_SOURCE_ID)
     try:
         from huggingface_hub import snapshot_download
@@ -161,34 +84,101 @@ def preload_whisper():
             repo_id=OV_SOURCE_ID,
             local_dir=OV_WHISPER_DIR,
             local_dir_use_symlinks=False,
-            max_workers=4
+            max_workers=4,
         )
-
         logger.info("Whisper (OpenVINO) source weights ready in %s", OV_WHISPER_DIR)
-        if CACHE_DIR:
-            os.makedirs(CACHE_DIR, exist_ok=True)
-            cache_path = os.path.join(CACHE_DIR, "whisper-openvino")
-            if os.path.exists(cache_path):
-                shutil.rmtree(cache_path)
-            shutil.copytree(OV_WHISPER_DIR, cache_path)
-
-    except Exception as e:
-        logger.error("Failed to download OpenVINO Whisper model: %s", e)
+        _cache_directory(OV_WHISPER_DIR, "whisper-openvino")
+    except Exception as exc:
+        logger.error("Failed to download OpenVINO Whisper model: %s", exc)
 
 
-def preload_uvr():
-    logger.info("--- [3/4] Preparing UVR Model ---")
+def _ov_has_required_files(directory):
+    files = set(os.listdir(directory))
+    critical_patterns = {
+        "openvino_encoder_model.xml",
+        "openvino_encoder_model.bin",
+        "openvino_decoder_model.xml",
+        "openvino_decoder_model.bin",
+    }
+    missing = sorted(critical_patterns.difference(files))
+    if missing:
+        logger.warning("Model directory %s is missing critical files: %s", directory, missing)
+        return False
+    return True
 
-    # Idempotency check
+
+def _ov_bins_are_large_enough(directory):
+    for filename in ("openvino_encoder_model.bin", "openvino_decoder_model.bin"):
+        file_path = os.path.join(directory, filename)
+        if not os.path.exists(file_path):
+            return False
+        size_bytes = os.path.getsize(file_path)
+        if size_bytes < 50 * 1024 * 1024:
+            logger.error("File %s is too small (%d bytes). Corrupted or empty.", filename, size_bytes)
+            return False
+    return True
+
+
+def _download_ct2_whisper():
+    logger.info("Downloading Whisper Model (CT2): %s to %s...", WHISPER_ID, WHISPER_DIR)
+    try:
+        download_model(WHISPER_ID, output_dir=WHISPER_DIR)
+        logger.info("Whisper (CT2) downloaded successfully.")
+        _cache_directory(WHISPER_DIR, "whisper")
+        return True
+    except Exception as exc:
+        logger.error("Failed to download Whisper model: %s", exc)
+        return False
+
+
+def _ensure_ct2_whisper():
+    if os.path.exists(os.path.join(WHISPER_DIR, "model.bin")):
+        logger.info("Faster-Whisper model already exists in %s. Skipping.", WHISPER_DIR)
+        return
+
+    if _restore_directory_from_cache("whisper", WHISPER_DIR, "Whisper (CT2)"):
+        return
+
+    if not _download_ct2_whisper():
+        sys.exit(1)
+
+
+def _export_openvino_whisper():
+    if not shutil.which("optimum-cli"):
+        logger.info("optimum-cli not found. Skipping build-time conversion.")
+        return False
+
+    logger.info("Exporting Whisper Model to OpenVINO using optimum-cli...")
+    try:
+        cmd = [
+            "optimum-cli",
+            "export",
+            "openvino",
+            "--model",
+            "openai/whisper-large-v3",
+            "--task",
+            "automatic-speech-recognition",
+            "--weight-format",
+            "fp16",
+            OV_WHISPER_DIR,
+        ]
+        logger.info("Running: %s", " ".join(cmd))
+        if _run_subprocess_command(cmd) and verify_ov_model(OV_WHISPER_DIR):
+            logger.info("Whisper (OpenVINO) exported successfully.")
+            _cache_directory(OV_WHISPER_DIR, "whisper-openvino")
+            return True
+        logger.warning("Optimum export failed or produced invalid model files.")
+    except Exception as exc:
+        logger.warning("Exception during optimum export: %s", exc)
+    return False
+
+
+def _ensure_uvr_model():
     if os.path.exists(os.path.join(UVR_DIR, UVR_MODEL)):
         logger.info("UVR model already exists in %s. Skipping.", UVR_DIR)
         return
 
-    if CACHE_DIR and os.path.exists(os.path.join(CACHE_DIR, "uvr")):
-        logger.info("Restoring UVR Model from cache...")
-        if os.path.exists(UVR_DIR):
-            shutil.rmtree(UVR_DIR)
-        shutil.copytree(os.path.join(CACHE_DIR, "uvr"), UVR_DIR)
+    if _restore_directory_from_cache("uvr", UVR_DIR, "UVR Model"):
         return
 
     logger.info("Downloading UVR Model: %s to %s...", UVR_MODEL, UVR_DIR)
@@ -196,65 +186,91 @@ def preload_uvr():
         sep = Separator(model_file_dir=UVR_DIR, output_dir="/tmp")
         sep.load_model(UVR_MODEL)
         logger.info("UVR Model downloaded successfully.")
-
-        if CACHE_DIR:
-            os.makedirs(CACHE_DIR, exist_ok=True)
-            cache_path = os.path.join(CACHE_DIR, "uvr")
-            if os.path.exists(cache_path):
-                shutil.rmtree(cache_path)
-            shutil.copytree(UVR_DIR, cache_path)
-    except Exception as e:
-        logger.error("Failed to download UVR model: %s", e)
+        _cache_directory(UVR_DIR, "uvr")
+    except Exception as exc:
+        logger.error("Failed to download UVR model: %s", exc)
         sys.exit(1)
 
 
-def preload_vad():
-    logger.info("--- [4/4] Preparing VAD Model (C++ ONNX) ---")
-
-    # Idempotency check
+def _ensure_vad_model():
     if os.path.exists(os.path.join(VAD_DIR, "silero_vad.onnx")):
         logger.info("VAD model already exists in %s. Skipping.", VAD_DIR)
         return
 
-    if CACHE_DIR and os.path.exists(os.path.join(CACHE_DIR, "vad")):
-        logger.info("Restoring VAD Model from cache...")
-        if os.path.exists(VAD_DIR):
-            shutil.rmtree(VAD_DIR)
-        shutil.copytree(os.path.join(CACHE_DIR, "vad"), VAD_DIR)
+    if _restore_directory_from_cache("vad", VAD_DIR, "VAD Model"):
         return
 
     logger.info("Downloading Silero VAD ONNX model to %s...", VAD_DIR)
     try:
-        os.makedirs(VAD_DIR, exist_ok=True)
         import requests
-        # Direct URL to the official Silero VAD ONNX model
+
         vad_url = "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx"
         target_path = os.path.join(VAD_DIR, "silero_vad.onnx")
 
+        os.makedirs(VAD_DIR, exist_ok=True)
         response = requests.get(vad_url, stream=True, timeout=30)
         response.raise_for_status()
-        with open(target_path, 'wb') as f:
+        with open(target_path, "wb") as file_handle:
             for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
+                file_handle.write(chunk)
 
         logger.info("Silero VAD ONNX downloaded successfully: %s", target_path)
-
-        if CACHE_DIR:
-            os.makedirs(CACHE_DIR, exist_ok=True)
-            cache_path = os.path.join(CACHE_DIR, "vad")
-            if os.path.exists(cache_path):
-                shutil.rmtree(cache_path)
-            shutil.copytree(VAD_DIR, cache_path)
-    except Exception as e:
-        logger.error("Failed to download Silero VAD ONNX: %s", e)
+        _cache_directory(VAD_DIR, "vad")
+    except Exception as exc:
+        logger.error("Failed to download Silero VAD ONNX: %s", exc)
         sys.exit(1)
+
+
+def verify_ov_model(directory):
+    """Verify that the directory contains a valid OpenVINO GenAI Whisper model."""
+    if not os.path.exists(directory):
+        return False
+
+    if not _ov_has_required_files(directory):
+        return False
+
+    return _ov_bins_are_large_enough(directory)
+
+
+def preload_whisper():
+    # 1. CTranslate2 (Faster-Whisper)
+    logger.info("--- [1/4] Preparing Faster-Whisper Model ---")
+    _ensure_ct2_whisper()
+
+    # 2. OpenVINO (Intel-Whisper)
+    logger.info("--- [2/4] Preparing OpenVINO Whisper Model ---")
+
+    if SKIP_INTEL_WHISPER:
+        logger.info("Intel Whisper preloading is disabled via flag. Skipping.")
+        return
+
+    if verify_ov_model(OV_WHISPER_DIR):
+        logger.info("OpenVINO Whisper model already exists and is valid. Skipping.")
+        return
+
+    if _restore_directory_from_cache("whisper-openvino", OV_WHISPER_DIR, "Whisper (OpenVINO)", validator=verify_ov_model):
+        return
+
+    if _export_openvino_whisper():
+        return
+
+    _download_openvino_source()
+
+
+def preload_uvr():
+    logger.info("--- [3/4] Preparing UVR Model ---")
+    _ensure_uvr_model()
+
+
+def preload_vad():
+    logger.info("--- [4/4] Preparing VAD Model (C++ ONNX) ---")
+    _ensure_vad_model()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--cache-dir", type=str, help="Persistent cache directory between builds")
-    parser.add_argument("--skip-intel-whisper", action="store_true",
-                        help="Skip preloading Intel Whisper models")
+    parser.add_argument("--skip-intel-whisper", action="store_true", help="Skip preloading Intel Whisper models")
     args = parser.parse_args()
 
     # Automatically use /root/.cache/model_downloads if no cache-dir is provided but we are in Docker

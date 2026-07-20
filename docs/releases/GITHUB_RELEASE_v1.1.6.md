@@ -1,0 +1,88 @@
+# Release v1.1.6 - Monitoring UI Modularization, Scheduler/Runtime Hardening, and CI Quality Gate Alignment
+
+This release consolidates a broad feature-branch update across monitoring UI architecture, backend runtime/scheduler correctness, CI parity scripts, and documentation governance.
+
+Compared to `main`, this branch includes substantial refactors and targeted robustness fixes.
+
+---
+
+## Highlights
+
+### Monitoring and Dashboard Architecture
+
+- Modularized dashboard scripts into feature-scoped modules under `modules/monitoring/templates/dashboard/`.
+- Split analytics runtime into structured modules under `modules/monitoring/templates/analytics/`.
+- Migrated script loading to manifest-driven assembly (`dashboard_js_files.txt`, `analytics_js_files.txt`) with deterministic ordering.
+- Removed legacy monolithic template scripts (`dashboard_main.js`, `dashboard_charts.js`) in favor of focused feature modules.
+- Updated CSS status rendering behavior and variable-driven visual consistency for runtime state indicators.
+
+### Scheduler, Telemetry, and Runtime Correctness
+
+- Refined telemetry ordering behavior and deterministic task sorting paths in monitoring payload generation.
+- Hardened telemetry history persistence and atomic write cleanup behavior for failure paths.
+- Updated runtime preprocessing/provider handling and related inference orchestration paths.
+- Improved temporary-asset cleanup behavior to isolate per-entry failures and continue purge processing.
+- Aligned temporary purge-path resolution with configured temp-dir selection logic.
+- Fixed Intel accelerator registration gaps and improved startup diagnostics when OpenVINO reports no usable GPU/NPU devices.
+- Clarified Intel Linux node handling as diagnostics-only when OpenVINO enumeration reports no usable accelerators; node visibility alone is not treated as runnable unit registration.
+- Updated UVR/OpenVINO preprocessing semantics to retry alternate Intel OpenVINO targets and then fall back to CPU preprocessing when Intel acceleration cannot be initialized.
+
+### API and Core Pipeline Maintenance
+
+- Updated API route modules and supporting core bootstrap/config/logging helpers for branch-wide consistency.
+- Synced subtitle/timestamp handling and utility helper behaviors with updated tests.
+- Applied targeted robustness updates across inference modules (scheduler/task helpers, model manager, VAD, diarization, Intel/runtime integration paths).
+
+### CI, Build Parity, and Quality Gates
+
+- Consolidated quality execution into the `Dockerfile.test` `test` image so linting, formatting, schema validation, audits, and tests run through a single Docker path in local parity scripts and GitHub Actions.
+- Moved PowerShell linting into the Docker test image by provisioning `pwsh` + `PSScriptAnalyzer` in the image and invoking it from `tests/run_suite.sh`.
+- Fixed ShellCheck compatibility for the Docker-only test runner path and removed split host/container lint execution drift.
+- Added dedicated GitHub Actions cache scoping for the Docker test environment so CI can reuse the test-image layers without production-image cache churn.
+- Updated Docker test-image bootstrap dependencies to support the in-image PowerShell analyzer runtime.
+- Strengthened CI parity scripts:
+  - `scripts/ci/build-and-test.sh`
+  - `scripts/ci/build-and-test.ps1`
+- Added shared dependency env bootstrap support via `scripts/ci/dependencies.env`.
+- Tightened quality gate guidance and enforcement alignment in agent skills and workflow docs.
+- Simplified ONNX runtime resolution in container builds by using deterministic path-based runtime bundles (`/app/libs/cpu`, `/app/libs/nvidia`, `/app/libs/intel`) instead of mixed ambiguous site-packages selection.
+
+### Tests, Fixtures, and Tooling Alignment
+
+- Updated JS unit tests and E2E fixture wiring for modular dashboard/analytics structure.
+- Updated monitoring, inference, and utility tests to match runtime behavior changes.
+- Kept vitest/eslint/playwright config and harness expectations synchronized with the refactor.
+
+### Documentation and Agent Governance Sync
+
+- Updated project docs and release/governance assets (`README.md`, `docs/SETUP.md`, `.agent/skills/*`, `AGENTS.md`) to reflect architecture and quality-gate changes.
+- Preserved endpoint taxonomy contract documentation while aligning implementation details and testing guidance.
+
+---
+
+## Verification Snapshot
+
+- Frontend quality gate workflow remains integrated (`npm run quality:frontend`, Playwright, lint/coverage checks).
+- Docker-only CI parity now runs through `powershell -ExecutionPolicy Bypass -File .\scripts\ci\build-and-test.ps1`, which completed successfully after the final test-image, ShellCheck, and Pylint fixes.
+- All enforced in-image gates were exercised in the Docker test environment: `PSScriptAnalyzer`, `actionlint`, `check-jsonschema`, `yamllint`, `shfmt`, `taplo`, `black --check`, `isort --check-only`, `ruff format --check`, `shellcheck`, `hadolint`, `eslint`, `stylelint`, `htmlhint`, `html-validate`, `markdownlint`, `ruff check`, `flake8`, `pylint`, Radon complexity checks, JS tests, Playwright E2E, pytest with coverage, and coverage-badge generation.
+- GitHub Actions now preserves a dedicated cache scope for the Docker test environment and lets the production build reuse that cache without overwriting it.
+- Additional targeted static validations were performed on modified Python helpers.
+- Note: Local pytest execution may require environment package restoration where `pytest` is not installed.
+
+---
+
+## Compatibility Notes
+
+- No intentional endpoint taxonomy change:
+  - Standard ASR class remains `/asr`, `/v1/audio/transcriptions`, `/v1/audio/translations`.
+  - Priority language-detection class remains `/detect-language`, `/detectlang`.
+
+---
+
+## v1.1.6 Release Addendum: Telemetry Update Rollback
+
+The telemetry-source migration experiment was removed. Runtime telemetry remains on the stable path:
+
+- CUDA telemetry uses `nvidia-smi` when available, with scheduler/activity fallback when unavailable.
+- Intel GPU/NPU telemetry uses native counters first, then Windows counters, then scheduler/activity fallback.
+- Anti-flapping behavior remains in place via held recent real samples before synthetic fallback.

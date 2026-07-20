@@ -26,11 +26,13 @@ Protect external API compatibility for:
 7. Verify endpoint normalization policy:
    - `/asr` and `/v1/audio/...` map to the same standard ASR execution behavior.
    - `/detect-language` and `/detectlang` map to identical high-priority language-ID behavior.
+8. Verify ASR observability log parity:
+   - Transcription and translation paths both emit a pre-inference log with the selected `unit_id`.
 
 ## Validation Commands
 
 ```bash
-.venv/bin/python -m pytest tests/integration/test_routes.py tests/integration/test_server.py tests/integration/test_system_routes.py
+.venv/bin/python -m pytest tests/integration/test_routes.py tests/integration/test_routes_helpers.py tests/integration/test_server.py tests/integration/test_system_routes.py
 ```
 
 ## Done Criteria

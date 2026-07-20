@@ -57,7 +57,7 @@ function buildDashboardDom() {
   </body></html>`, { url: "http://localhost/" });
 }
 
-describe("dashboard_main.js", () => {
+describe("main.js", () => {
   let dom;
   let fetchMock;
   let context;
@@ -167,6 +167,7 @@ describe("dashboard_main.js", () => {
       document: dom.window.document,
       fetch: fetchMock,
       alert: () => {},
+      confirm: () => true,
       Event: dom.window.Event,
       setTimeout,
       clearTimeout,
@@ -185,10 +186,15 @@ describe("dashboard_main.js", () => {
       refreshEnabled: true,
     };
 
-    context = loadScriptInContext(path.join(__dirname, "../../modules/monitoring/templates/dashboard_utils.js"), baseContext);
-    context = loadScriptInContext(path.join(__dirname, "../../modules/monitoring/templates/dashboard_state.js"), context);
-    context.renderCharts = () => {};
-    context = loadScriptInContext(path.join(__dirname, "../../modules/monitoring/templates/dashboard_main.js"), context);
+    context = loadScriptInContext(path.join(__dirname, "../../modules/monitoring/templates/dashboard/core/state.js"), baseContext);
+    context = loadScriptInContext(path.join(__dirname, "../../modules/monitoring/templates/dashboard/core/utils.js"), context);
+    context = loadScriptInContext(path.join(__dirname, "../../modules/monitoring/templates/dashboard/features/charts.js"), context);
+    context = loadScriptInContext(path.join(__dirname, "../../modules/monitoring/templates/dashboard/features/audit.js"), context);
+    context = loadScriptInContext(path.join(__dirname, "../../modules/monitoring/templates/dashboard/features/task_filter_history.js"), context);
+    context = loadScriptInContext(path.join(__dirname, "../../modules/monitoring/templates/dashboard/features/speed_status.js"), context);
+    context = loadScriptInContext(path.join(__dirname, "../../modules/monitoring/templates/dashboard/features/active_tasks.js"), context);
+    context = loadScriptInContext(path.join(__dirname, "../../modules/monitoring/templates/dashboard/features/runtime.js"), context);
+    context = loadScriptInContext(path.join(__dirname, "../../modules/monitoring/templates/dashboard/main.js"), context);
   });
 
   it("handles tab switching, history rendering, settings save, and status refresh", async () => {
@@ -209,6 +215,102 @@ describe("dashboard_main.js", () => {
 
     const audit = context.renderAuditDetails({ task_id: "x", caller_info: { ip: "127.0.0.1" }, request_json: {}, result: {} });
     expect(audit).toContain("Audit & Caller Info");
+  });
+
+  it("covers settings/history/telemetry action branches and audit open/user-agent display", async () => {
+    const alerts = [];
+    context.alert = (msg) => alerts.push(String(msg));
+
+    // saveSettings catch branch
+    fetchMock.mockRejectedValueOnce(new Error("settings down"));
+    await context.saveSettings();
+    expect(alerts.some((msg) => msg.includes("Failed to save settings"))).toBe(true);
+
+    // clearTaskHistory early-return branch (confirm false)
+    context.confirm = () => false;
+    const beforeCalls = fetchMock.mock.calls.length;
+    await context.clearTaskHistory();
+    expect(fetchMock.mock.calls.length).toBe(beforeCalls);
+
+    // clearTaskHistory failure branch (confirm true + non-ok)
+    context.confirm = () => true;
+    fetchMock.mockResolvedValueOnce({ ok: false });
+    await context.clearTaskHistory();
+    expect(alerts.some((msg) => msg.includes("Failed to clear task history."))).toBe(true);
+
+    // clearTelemetryMetrics success branch + reset callback branch
+    let resetCalled = 0;
+    context.resetTelemetryChartsAndStats = () => {
+      resetCalled += 1;
+    };
+    fetchMock.mockResolvedValueOnce({ ok: true });
+    await context.clearTelemetryMetrics();
+    expect(resetCalled).toBe(1);
+    expect(alerts.some((msg) => msg.includes("Telemetry history purged successfully."))).toBe(true);
+
+    // clearTelemetryMetrics catch branch
+    fetchMock.mockRejectedValueOnce(new Error("telemetry down"));
+    await context.clearTelemetryMetrics();
+    expect(alerts.some((msg) => msg.startsWith("Error:"))).toBe(true);
+
+    // audit.js additional branches: user-agent provided + expanded open state
+    evalInContext(
+      context,
+      "expandedElements.add('audit-1_audit'); expandedElements.add('audit-1_req'); expandedElements.add('audit-1_res');"
+    );
+    const auditWithUa = context.renderAuditDetails({
+      task_id: "audit-1",
+      caller_info: {
+        ip: "127.0.0.1",
+        user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Long UA String",
+      },
+      request_json: { a: 1 },
+      result: { ok: true },
+    });
+    expect(auditWithUa).toMatch(/<details[^>]*open/);
+    expect(auditWithUa).toContain('UA:');
+  });
+
+  it("covers remaining main module refresh and maintenance branches", async () => {
+    const alerts = [];
+    context.alert = (msg) => alerts.push(String(msg));
+
+    // startRefreshInterval branch where existing timer is cleared first.
+    evalInContext(context, "refreshTimer = setInterval(() => {}, 1000);");
+    context.startRefreshInterval();
+
+    // clearTaskHistory success branch
+    evalInContext(context, "fullTaskHistory = [{ task_id: 't1' }]");
+    let renderHistoryCalls = 0;
+    context.renderHistory = () => {
+      renderHistoryCalls += 1;
+    };
+    context.confirm = () => true;
+    fetchMock.mockResolvedValueOnce({ ok: true });
+    await context.clearTaskHistory();
+    expect(renderHistoryCalls).toBeGreaterThan(0);
+    expect(alerts.some((msg) => msg.includes("Task history purged successfully."))).toBe(true);
+
+    // clearTaskHistory catch branch
+    fetchMock.mockRejectedValueOnce(new Error("history down"));
+    await context.clearTaskHistory();
+    expect(alerts.some((msg) => msg.startsWith("Error:"))).toBe(true);
+
+    // clearTelemetryMetrics confirm false branch
+    context.confirm = () => false;
+    const beforeCalls = fetchMock.mock.calls.length;
+    await context.clearTelemetryMetrics();
+    expect(fetchMock.mock.calls.length).toBe(beforeCalls);
+
+    // clearTelemetryMetrics non-ok branch
+    context.confirm = () => true;
+    fetchMock.mockResolvedValueOnce({ ok: false });
+    await context.clearTelemetryMetrics();
+    expect(alerts.some((msg) => msg.includes("Failed to clear telemetry metrics."))).toBe(true);
+
+    // window.onload branch where matchMedia is absent
+    context.window.matchMedia = null;
+    context.window.onload();
   });
 
   it("normalizes placeholder stage and status values in rendered tasks", async () => {
@@ -283,32 +385,35 @@ describe("dashboard_main.js", () => {
     await context.updateStats();
     expect(consoleSpy).toHaveBeenCalled();
 
-    context.fullTaskHistory = [
-      {
-        task_id: "err-1",
-        filename: "broken.mp4",
-        type: "Transcription",
-        completed_at: "now",
-        status: "failed",
-        video_duration: 0,
-        active_elapsed_sec: 1,
-        queue_elapsed_sec: 0,
-        result: { error: "boom" },
-        logs: ["bad"],
-      },
-      {
-        task_id: "none-1",
-        filename: "silent.mp4",
-        type: "ASR",
-        completed_at: "now",
-        status: "completed",
-        video_duration: 20,
-        active_elapsed_sec: 10,
-        queue_elapsed_sec: 1,
-        result: { segments: [] },
-        logs: [],
-      },
-    ];
+    evalInContext(
+      context,
+      `fullTaskHistory = ${JSON.stringify([
+        {
+          task_id: "err-1",
+          filename: "broken.mp4",
+          type: "Transcription",
+          completed_at: "now",
+          status: "failed",
+          video_duration: 0,
+          active_elapsed_sec: 1,
+          queue_elapsed_sec: 0,
+          result: { error: "boom" },
+          logs: ["bad"],
+        },
+        {
+          task_id: "none-1",
+          filename: "silent.mp4",
+          type: "ASR",
+          completed_at: "now",
+          status: "completed",
+          video_duration: 20,
+          active_elapsed_sec: 10,
+          queue_elapsed_sec: 1,
+          result: { segments: [] },
+          logs: [],
+        },
+      ])}`
+    );
 
     context.renderHistory();
     const html = dom.window.document.getElementById("history-list").innerHTML;
@@ -432,6 +537,139 @@ describe("dashboard_main.js", () => {
     context.window.onload();
     expect(typeof darkListener).toBe("function");
     darkListener();
+  });
+
+  it("renders hardware in history cards using history_unit_id fallback", () => {
+    evalInContext(
+      context,
+      `fullTaskHistory = ${JSON.stringify([
+        {
+          task_id: "hist-hw-1",
+          filename: "history_hw.mp4",
+          type: "Transcription",
+          completed_at: "now",
+          status: "completed",
+          video_duration: 120,
+          active_elapsed_sec: 30,
+          queue_elapsed_sec: 2,
+          unit_id: null,
+          history_unit_id: "GPU.0",
+          result: { text: "ok", segments: [{ start: 0, end: 1, text: "ok" }] },
+          logs: ["ok"],
+        },
+      ])}`
+    );
+
+    context.renderHistory();
+    const html = dom.window.document.getElementById("history-list").innerHTML;
+    expect(html).toContain("Intel GPU");
+    expect(html).not.toContain("Intel GPU (GPU.0)");
+  });
+
+  it("renders slot suffix for history hardware when multiple units of the same family exist", () => {
+    evalInContext(
+      context,
+      `lastStatusData = ${JSON.stringify({
+        hardware_units: [
+          { id: "GPU.0", type: "GPU", name: "Intel GPU" },
+          { id: "GPU.1", type: "GPU", name: "Intel GPU" },
+          { id: "NPU.0", type: "NPU", name: "Intel NPU" },
+        ],
+      })}`
+    );
+
+    evalInContext(
+      context,
+      `fullTaskHistory = ${JSON.stringify([
+        {
+          task_id: "hist-hw-2",
+          filename: "history_hw_multi.mp4",
+          type: "Transcription",
+          completed_at: "now",
+          status: "completed",
+          video_duration: 120,
+          active_elapsed_sec: 30,
+          queue_elapsed_sec: 2,
+          unit_id: null,
+          history_unit_id: "GPU.1",
+          result: { text: "ok", segments: [{ start: 0, end: 1, text: "ok" }] },
+          logs: ["ok"],
+        },
+      ])}`
+    );
+
+    context.renderHistory();
+    const html = dom.window.document.getElementById("history-list").innerHTML;
+    expect(html).toContain("Intel GPU (GPU.1)");
+  });
+
+  it("does not append suffix for generic family ids", () => {
+    evalInContext(
+      context,
+      `lastStatusData = ${JSON.stringify({
+        hardware_units: [
+          { id: "GPU", type: "GPU", name: "Intel GPU" },
+          { id: "NPU", type: "NPU", name: "Intel NPU" },
+        ],
+      })}`
+    );
+
+    const gpu = context.getHwIconAndLabel("GPU");
+    const npu = context.getHwIconAndLabel("NPU");
+    expect(gpu.label).toBe("Intel GPU");
+    expect(npu.label).toBe("Intel NPU");
+  });
+
+  it("renders hardware in history cards using history unit metadata when IDs are missing", () => {
+    evalInContext(
+      context,
+      `fullTaskHistory = ${JSON.stringify([
+        {
+          task_id: "hist-hw-meta-1",
+          filename: "history_hw_meta.mp4",
+          type: "Transcription",
+          completed_at: "now",
+          status: "completed",
+          video_duration: 120,
+          active_elapsed_sec: 30,
+          queue_elapsed_sec: 2,
+          unit_id: null,
+          history_unit_id: null,
+          history_unit_type: "GPU",
+          history_unit_name: "Intel Arc A770",
+          result: { text: "ok", segments: [{ start: 0, end: 1, text: "ok" }] },
+          logs: ["ok"],
+        },
+      ])}`
+    );
+
+    context.renderHistory();
+    const html = dom.window.document.getElementById("history-list").innerHTML;
+    expect(html).toContain("Intel Arc A770");
+  });
+
+  it("covers history hardware helper fallback branches", () => {
+    const noMetaTag = context._historyHardwareTag({ unit_id: null, history_unit_id: null });
+    expect(noMetaTag).toBe("");
+
+    const typeOnlyTag = context._historyHardwareTag({
+      unit_id: null,
+      history_unit_id: null,
+      history_unit_type: "CPU",
+      history_unit_name: null,
+    });
+    expect(typeOnlyTag).toContain("CPU");
+    expect(typeOnlyTag).toContain("settings_input_component");
+
+    expect(context._historyHardwareIconForType("CUDA")).toBe("rocket_launch");
+    expect(context._historyHardwareIconForType("NPU")).toBe("psychology_alt");
+    expect(context._historyHardwareIconForType("GPU")).toBe("developer_board");
+    expect(context._historyHardwareIconForType("CPU")).toBe("settings_input_component");
+    expect(context._historyHardwareIconForType("SOMETHING")).toBe("memory");
+    expect(context._historyHardwareIconForType(null)).toBe("memory");
+
+    expect(context._historyHardwareLabelFromMeta("GPU", "")).toBe("GPU");
+    expect(context._historyHardwareLabelFromMeta(null, null)).toBe("Unknown Hardware");
   });
 
   it("covers showTab chart/history branches and handleToggle open-close paths", async () => {
@@ -1671,7 +1909,7 @@ describe("dashboard_main.js", () => {
 
     context.fetch = vi.fn(async () => ({
       json: async () => ({
-        version: "1.1.5",
+        version: "1.1.6",
         active_sessions: 1,
         queued_sessions: 2,
         system: { cpu_percent: 10, app_cpu_percent: 5, app_memory_gb: 1, memory_total_gb: 16, memory_used_gb: 8, memory_percent: 50 },
@@ -1706,7 +1944,7 @@ describe("dashboard_main.js", () => {
 
     context.fetch = vi.fn(async () => ({
       json: async () => ({
-        version: "1.1.5",
+        version: "1.1.6",
         active_sessions: 1,
         queued_sessions: 1,
         system: { cpu_percent: 10, app_cpu_percent: 5, app_memory_gb: 1, memory_total_gb: 16, memory_used_gb: 8, memory_percent: 50 },
@@ -1728,5 +1966,35 @@ describe("dashboard_main.js", () => {
     const renderedCards = Array.from(dom.window.document.querySelectorAll("#task-list .task-card"));
     expect(renderedCards).toHaveLength(1);
     expect(renderedCards[0].dataset.taskId).toBe("t-visible");
+  });
+
+  it("covers task order comparator tie-break branches", () => {
+    const sameTierDifferentTimeA = { task_id: "a", status: "queued", is_priority: true, start_time: 100 };
+    const sameTierDifferentTimeB = { task_id: "b", status: "queued", is_priority: true, start_time: 120 };
+    const byTime = evalInContext(
+      context,
+      `_compareTaskOrder(${JSON.stringify(sameTierDifferentTimeA)}, ${JSON.stringify(sameTierDifferentTimeB)})`
+    );
+    expect(byTime).toBeLessThan(0);
+
+    const sameTierSameTimeA = { task_id: "a", status: "queued", is_priority: false, start_time: 200 };
+    const sameTierSameTimeB = { task_id: "b", status: "queued", is_priority: false, start_time: 200 };
+    const byId = evalInContext(
+      context,
+      `_compareTaskOrder(${JSON.stringify(sameTierSameTimeA)}, ${JSON.stringify(sameTierSameTimeB)})`
+    );
+    expect(byId).toBeLessThan(0);
+  });
+
+  it("covers timestamp comparability and UVR speed estimation helper", () => {
+    const mismatched = evalInContext(context, `_areComparableTimestamps(3997, ${Math.floor(Date.now() / 1000)})`);
+    expect(mismatched).toBe(false);
+
+    const estimate = evalInContext(
+      context,
+      `_taskSpeedEtaEstimate(${JSON.stringify({ type: "Transcription", stage: "Vocal Separation", video_duration: 120, current_position: 20, start_active: 1000, start_inference: 1000 })}, 1010, ${JSON.stringify({ expectedAsrSpeed: 2, expectedUvrSpeed: 1 })}, "Vocal Separation")`
+    );
+    expect(estimate.calculatedSpeed).toBeCloseTo(1.0, 5);
+    expect(estimate.remainingSeconds).toBeCloseTo(110, 5);
   });
 });

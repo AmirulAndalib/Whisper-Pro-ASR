@@ -21,7 +21,6 @@ cleanup() {
 trap cleanup EXIT
 
 # Colors
-RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
@@ -32,7 +31,6 @@ NC='\033[0m'
 ITERATION=1
 MAX_ITERATIONS=10
 RESOLVED_COUNT=0
-TOTAL_COMMENTS=0
 
 print_header() {
     echo ""
@@ -43,15 +41,15 @@ print_header() {
 }
 
 print_step() {
-    echo -e "${BLUE}→ $1${NC}"
+    echo -e "${BLUE}[>] $1${NC}"
 }
 
 print_success() {
-    echo -e "${GREEN}✅ $1${NC}"
+    echo -e "${GREEN}[OK] $1${NC}"
 }
 
 print_info() {
-    echo -e "${YELLOW}ℹ️  $1${NC}"
+    echo -e "${YELLOW}[i] $1${NC}"
 }
 
 # ============================================================================
@@ -59,8 +57,10 @@ print_info() {
 # ============================================================================
 fetch_pr_feedback() {
     print_step "Fetching all PR feedback..."
-    local OWNER=$(echo "$REPO" | cut -d'/' -f1)
-    local NAME=$(echo "$REPO" | cut -d'/' -f2)
+    local OWNER
+    local NAME
+    OWNER=$(echo "$REPO" | cut -d'/' -f1)
+    NAME=$(echo "$REPO" | cut -d'/' -f2)
 
     gh pr view "$PR_NUMBER" --repo "$REPO" \
         --json comments,reviews,statusCheckRollup \
@@ -69,7 +69,9 @@ fetch_pr_feedback() {
         return 1
     }
         
-    local query='query($owner: String!, $name: String!, $pr: Int!) {
+        local query
+        query=$(cat <<'GRAPHQL_QUERY'
+query($owner: String!, $name: String!, $pr: Int!) {
       repository(owner: $owner, name: $name) {
         pullRequest(number: $pr) {
           reviewThreads(first: 100) {
@@ -91,7 +93,9 @@ fetch_pr_feedback() {
           }
         }
       }
-    }'
+        }
+GRAPHQL_QUERY
+)
     
     gh api graphql -F owner="$OWNER" -F name="$NAME" -F pr="$PR_NUMBER" -f query="$query" \
         > "$PR_FEEDBACK_DIR/review_threads_${ITERATION}.json" || {
@@ -146,7 +150,8 @@ resolve_comments_with_solutions() {
     local pending_count=0
     
     # Parse review threads from the GraphQL data
-    local threads_data=$(jq -r '.data.repository.pullRequest.reviewThreads.nodes[] | select(
+    local threads_data
+    threads_data=$(jq -r '.data.repository.pullRequest.reviewThreads.nodes[] | select(
         .isResolved == false and 
         (.comments.nodes[0].author.login == "coderabbitai" or .comments.nodes[0].author.login == "coderabbitai[bot]" or .comments.nodes[0].author.login == "Copilot")
     ) | "\(.id)\t\(.comments.nodes[0].databaseId)\t\(.comments.nodes[0].author.login)\t\(.comments.nodes[0].body | @base64)\t\(.comments.nodes[0].path)"' "$PR_FEEDBACK_DIR/review_threads_${ITERATION}.json" 2>/dev/null)
@@ -241,7 +246,7 @@ post_solution_reply_to_comment() {
     local comment_body=$3
     local file_path=$4
     
-    local solution_comment="**✅ Potential Resolution Prepared** 
+    local solution_comment="**âœ… Potential Resolution Prepared** 
 
 This has been addressed in the PR by updating the code in \`$file_path\` corresponding to the review feedback:
 
@@ -264,13 +269,17 @@ Verification details are tracked in CI and local run artifacts for this PR."
 resolve_pr_comment() {
     local thread_id=$1
     
-    local mutation='mutation($threadId: ID!) {
+        local mutation
+        mutation=$(cat <<'GRAPHQL_MUTATION'
+mutation($threadId: ID!) {
       resolveReviewThread(input: {threadId: $threadId}) {
         thread {
           isResolved
         }
       }
-    }'
+        }
+GRAPHQL_MUTATION
+)
     
     if gh api graphql -F threadId="$thread_id" -f query="$mutation" >/dev/null 2>&1; then
         return 0
@@ -286,8 +295,9 @@ resolve_pr_comment() {
 post_iteration_status() {
     local iteration=$1
     local unresolved=$2
-    local comment_body="
-## 🔄 Continuous Resolution - Iteration $iteration/$MAX_ITERATIONS
+    local comment_body
+    comment_body="
+## [LOOP] Continuous Resolution - Iteration $iteration/$MAX_ITERATIONS
 
 **Timestamp**: $(date '+%Y-%m-%d %H:%M:%S')
 
@@ -298,11 +308,11 @@ post_iteration_status() {
 - Coverage: Validating
 
 ### Sources
-- Copilot: ✅ Processed
-- CodeRabbit: ✅ Processed  
-- Comments: ✅ Analyzed
+- Copilot: âœ… Processed
+- CodeRabbit: âœ… Processed  
+- Comments: âœ… Analyzed
 
-**Status**: $([ "$unresolved" -eq 0 ] && echo '✅ ALL RESOLVED' || echo 'Processing...')"
+**Status**: $([ "$unresolved" -eq 0 ] && echo 'âœ… ALL RESOLVED' || echo 'Processing...')"
 
     gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$comment_body" 2>/dev/null || true
 }
@@ -330,8 +340,9 @@ post_final_summary() {
         checks_status="$checks_ok/$checks_total successful"
     fi
     
-    local summary="
-## ✅ CONTINUOUS RESOLUTION COMPLETE
+    local summary
+    summary="
+## âœ… CONTINUOUS RESOLUTION COMPLETE
 
 **Skill**: resolve-pr-comments v3.0.0  
 **Executed**: $(date '+%Y-%m-%d %H:%M:%S')  
@@ -364,7 +375,7 @@ main() {
     echo -e "PR: ${CYAN}#$PR_NUMBER${NC} in ${CYAN}$REPO${NC}"
     echo -e "Max iterations: ${CYAN}$MAX_ITERATIONS${NC}"
     echo ""
-    echo -e "${YELLOW}🔄 Starting continuous resolution loop...${NC}"
+    echo -e "${YELLOW}[LOOP] Starting continuous resolution loop...${NC}"
     echo -e "${YELLOW}   This loop WILL NOT STOP until ALL comments are resolved${NC}"
     echo ""
     
@@ -377,7 +388,7 @@ main() {
             if [ "$ITERATION" -lt "$MAX_ITERATIONS" ]; then
                 ITERATION=$((ITERATION + 1))
                 echo ""
-                echo -e "${YELLOW}⏳ Retrying in next iteration in 3 seconds...${NC}"
+                echo -e "${YELLOW}â³ Retrying in next iteration in 3 seconds...${NC}"
                 sleep 3
                 continue
             fi
@@ -407,7 +418,7 @@ main() {
         # Step 6: Check if done
         echo ""
         if [ "$UNRESOLVED" -eq 0 ]; then
-            echo -e "${GREEN}✅✅✅ ALL COMMENTS RESOLVED ✅✅✅${NC}"
+            echo -e "${GREEN}âœ…âœ…âœ… ALL COMMENTS RESOLVED âœ…âœ…âœ…${NC}"
             break
         fi
         
@@ -415,7 +426,7 @@ main() {
         if [ "$ITERATION" -lt "$MAX_ITERATIONS" ]; then
             ITERATION=$((ITERATION + 1))
             echo ""
-            echo -e "${YELLOW}⏳ Moving to iteration $ITERATION in 3 seconds...${NC}"
+            echo -e "${YELLOW}â³ Moving to iteration $ITERATION in 3 seconds...${NC}"
             sleep 3
         else
             ITERATION=$((ITERATION + 1))
@@ -434,10 +445,10 @@ main() {
     
     post_final_summary "$((ITERATION - 1))"
     
-    echo -e "${GREEN}✅ Continuous resolution skill execution complete!${NC}"
+    echo -e "${GREEN}âœ… Continuous resolution skill execution complete!${NC}"
     echo ""
     echo -e "PR Status: $(gh pr view "$PR_NUMBER" --repo "$REPO" --json state --jq '.state')"
-    echo -e "Next step: Review and merge when approved ✅"
+    echo -e "Next step: Review and merge when approved âœ…"
 }
 
 # ============================================================================

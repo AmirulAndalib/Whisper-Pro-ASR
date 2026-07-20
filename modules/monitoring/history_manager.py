@@ -7,7 +7,6 @@ persistent storage on disk and a RAM cache for fast access.
 
 import json
 import logging
-import ntpath
 import os
 import sys
 import threading
@@ -17,11 +16,34 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from modules.core import config
+from modules.monitoring.history_helpers import (
+    accumulate_stats,
+    backfill_task_filenames,
+    iter_unique_legacy_paths,
+    merge_legacy_analytics,
+    new_stats_payload,
+)
+from modules.monitoring.io_utils import load_json_list_file
 
 logger = logging.getLogger(__name__)
 
 HISTORY_FILE = os.path.join(config.STATE_DIR, "task_history.json")
 ANALYTICS_FILE = os.path.join(config.STATE_DIR, "analytics_stats.json")
+LEGACY_STATE_DIR = os.environ.get("WHISPER_LEGACY_STATE_DIR", "/app/state-legacy")
+LEGACY_HISTORY_FILES = [
+    os.path.join(LEGACY_STATE_DIR, "task_history.json"),
+    os.path.join("/app/state", "task_history.json"),
+    os.path.join("/app/data-legacy", "task_history.json"),
+    os.path.join(os.path.abspath("state"), "task_history.json"),
+    os.path.join(os.path.abspath("data"), "task_history.json"),
+]
+LEGACY_ANALYTICS_FILES = [
+    os.path.join(LEGACY_STATE_DIR, "analytics_stats.json"),
+    os.path.join("/app/state", "analytics_stats.json"),
+    os.path.join("/app/data-legacy", "analytics_stats.json"),
+    os.path.join(os.path.abspath("state"), "analytics_stats.json"),
+    os.path.join(os.path.abspath("data"), "analytics_stats.json"),
+]
 MAX_HISTORY_DISK = 1000  # Persistent storage limit
 MAX_HISTORY_RAM = 20  # RAM cache limit (match disk limit for accurate stats)
 
@@ -33,41 +55,8 @@ LAST_SYNC = time.time()
 STATS_CACHE: Optional[Dict[str, Any]] = None
 STATS_CACHE_DATE: Optional[str] = None
 ANALYTICS_LOCK = threading.RLock()
-
-
-def _backfill_task_filenames(data: Any) -> None:
-    """Helper to resolve and clean generic task filenames in a flat list of history tasks."""
-    if not isinstance(data, list):
-        return
-    for task in data:
-        if not isinstance(task, dict):
-            continue
-        req_json = task.get("request_json") or {}
-        if not isinstance(req_json, dict):
-            req_json = {}
-
-        candidates = [
-            req_json.get("video_file"),
-            req_json.get("local_path"),
-            req_json.get("file_path"),
-            req_json.get("original_path"),
-            req_json.get("file"),
-            req_json.get("audio_file"),
-        ]
-
-        best_name = None
-        for val in candidates:
-            if val and isinstance(val, str) and val.strip():
-                clean_val = val.strip().strip('"').strip("'")
-                base = ntpath.basename(clean_val)
-                if base not in ["", "audio_file", "file", "blob", "Unknown", "Unknown Media"]:
-                    best_name = base
-                    break
-
-        current_filename = task.get("filename")
-        if current_filename in [None, "audio_file", "file", "blob", "Unknown", "Unknown Media"]:
-            if best_name:
-                task["filename"] = best_name
+ANALYTICS_SCHEMA_VERSION = 2
+ANALYTICS_SCHEMA_KEY = "__schema_version__"
 
 
 def ensure_loaded() -> None:
@@ -76,61 +65,59 @@ def ensure_loaded() -> None:
     """
     module = sys.modules[__name__]
     if not module.HISTORY_CACHE:
-        if os.path.exists(HISTORY_FILE):
+        data, imported_from_legacy = _load_history_cache_from_disk()
+        module.HISTORY_CACHE = data
+        backfill_task_filenames(module.HISTORY_CACHE)
+        if imported_from_legacy:
             try:
-                with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                module.HISTORY_CACHE = data
-                _backfill_task_filenames(data)
-            except (IOError, json.JSONDecodeError) as e:
-                logger.warning("[History] Failed to load history file: %s", e)
-                module.HISTORY_CACHE = []
+                os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
+                _persist_history_data(module.HISTORY_CACHE[:MAX_HISTORY_DISK])
+            except (IOError, OSError) as e:
+                logger.warning("[History] Failed to persist imported legacy history: %s", e)
 
 
-def _merge_legacy_analytics(old_cache: Dict[str, Any], new_cache: Dict[str, Any]) -> None:
-    """Helper to merge legacy cache items that aren't in history anymore."""
-    for date_str, daily_data in old_cache.items():
-        if not isinstance(daily_data, dict):
-            continue
+def _load_history_cache_from_disk() -> tuple[List[Dict[str, Any]], bool]:
+    primary_entries = _load_primary_history_entries()
+    if primary_entries is not None:
+        return primary_entries, False
 
-        # Check if this day is already categorized
-        has_categories = all(cat in daily_data for cat in ["asr", "detectlang", "audio"])
+    legacy_loaded = _load_legacy_history_entries()
+    if legacy_loaded is None:
+        return [], False
 
-        if has_categories:
-            # If the old data is already fully categorized, preserve it.
-            # In case it overlaps with rebuilt cache, we prioritize the old cache
-            # since it accumulated stats in real-time and isn't truncated to history limit.
-            new_cache[date_str] = daily_data
-            continue
+    legacy_path, legacy_entries = legacy_loaded
+    if legacy_entries:
+        logger.info("[History] Importing %d legacy tasks from %s", len(legacy_entries), legacy_path)
+    return legacy_entries, True
 
-        # For uncategorized legacy days:
-        if date_str in new_cache:
-            # If it overlaps with rebuilt cache, merge them by keeping the old total
-            # count/duration and attributing any pruned difference to the default "asr" category.
-            rebuilt_data = new_cache[date_str]
-            old_count = daily_data.get("count", 0)
-            old_dur = daily_data.get("duration", 0.0)
-            rebuilt_count = rebuilt_data.get("count", 0)
-            rebuilt_dur = rebuilt_data.get("duration", 0.0)
 
-            diff_count = max(0, old_count - rebuilt_count)
-            diff_dur = max(0.0, old_dur - rebuilt_dur)
+def _load_primary_history_entries() -> Optional[List[Dict[str, Any]]]:
+    if not os.path.exists(HISTORY_FILE):
+        return None
+    loaded = _read_history_file_entries()
+    if loaded is None:
+        return []
+    return [entry for entry in loaded if isinstance(entry, dict)]
 
-            if old_count >= rebuilt_count:
-                rebuilt_data["count"] = old_count
-            if old_dur >= rebuilt_dur:
-                rebuilt_data["duration"] = old_dur
 
-            if "asr" not in rebuilt_data:
-                rebuilt_data["asr"] = {"count": 0, "duration": 0.0}
-            rebuilt_data["asr"]["count"] += diff_count
-            rebuilt_data["asr"]["duration"] += diff_dur
-        else:
-            # If it doesn't overlap, backfill it entirely as "asr"
-            daily_data["asr"] = {"count": daily_data.get("count", 0), "duration": daily_data.get("duration", 0.0)}
-            daily_data["detectlang"] = {"count": 0, "duration": 0.0}
-            daily_data["audio"] = {"count": 0, "duration": 0.0}
-            new_cache[date_str] = daily_data
+def _load_legacy_history_entries() -> Optional[Tuple[str, List[Dict[str, Any]]]]:
+    legacy_path = _find_legacy_file(LEGACY_HISTORY_FILES, HISTORY_FILE)
+    if not legacy_path:
+        return None
+
+    legacy_loaded = load_json_list_file(legacy_path)
+    if legacy_loaded is None:
+        return None
+
+    legacy_entries = [entry for entry in legacy_loaded if isinstance(entry, dict)]
+    return legacy_path, legacy_entries
+
+
+def _find_legacy_file(candidates: List[str], current_file: str) -> Optional[str]:
+    for candidate_abs in iter_unique_legacy_paths(candidates, current_file):
+        if os.path.exists(candidate_abs):
+            return candidate_abs
+    return None
 
 
 def ensure_analytics_loaded() -> None:
@@ -139,58 +126,139 @@ def ensure_analytics_loaded() -> None:
     """
     module = sys.modules[__name__]
     with ANALYTICS_LOCK:
-        if module.ANALYTICS_CACHE is None:
-            if os.path.exists(ANALYTICS_FILE):
-                try:
-                    with open(ANALYTICS_FILE, "r", encoding="utf-8") as f:
-                        module.ANALYTICS_CACHE = json.load(f)
-                except (IOError, json.JSONDecodeError) as e:
-                    logger.warning("[Analytics] Failed to load analytics file: %s", e)
-                    module.ANALYTICS_CACHE = {}
-            else:
-                module.ANALYTICS_CACHE = {}
+        if module.ANALYTICS_CACHE is not None:
+            return
+        module.ANALYTICS_CACHE = _load_analytics_cache_from_disk()
+        if _analytics_cache_needs_rebuild(module.ANALYTICS_CACHE):
+            _rebuild_and_persist_analytics(module)
 
-            # Backfill or rebuild if cache is empty or lacks category fields
-            needs_rebuild = not module.ANALYTICS_CACHE or any(
-                not isinstance(v, dict) or "asr" not in v for v in module.ANALYTICS_CACHE.values()
-            )
-            if needs_rebuild:
-                logger.info("[Analytics] Rebuilding analytics stats from task history...")
-                old_cache = dict(module.ANALYTICS_CACHE)
-                rebuild_analytics_from_history()
-                _merge_legacy_analytics(old_cache, module.ANALYTICS_CACHE)
 
-                try:
-                    os.makedirs(config.STATE_DIR, exist_ok=True)
-                    tmp_file = f"{ANALYTICS_FILE}.tmp"
-                    with open(tmp_file, "w", encoding="utf-8") as f:
-                        json.dump(module.ANALYTICS_CACHE, f, indent=2)
-                    os.replace(tmp_file, ANALYTICS_FILE)
-                except (IOError, OSError) as e:
-                    logger.error("[Analytics] Failed to save rebuilt analytics: %s", e)
+def _load_analytics_cache_from_disk() -> Dict[str, Any]:
+    loaded, imported_from_path = _read_analytics_cache_file()
+    if loaded is None:
+        return _default_analytics_cache()
+    sanitized = _sanitize_analytics_cache(loaded)
+    if imported_from_path is not None and sanitized:
+        logger.info("[Analytics] Imported legacy analytics from %s", imported_from_path)
+        _persist_analytics_cache(sanitized)
+    return sanitized
+
+
+def _default_analytics_cache() -> Dict[str, Any]:
+    return {ANALYTICS_SCHEMA_KEY: ANALYTICS_SCHEMA_VERSION}
+
+
+def _read_analytics_cache_file() -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    if not os.path.exists(ANALYTICS_FILE):
+        legacy_path = _find_legacy_file(LEGACY_ANALYTICS_FILES, ANALYTICS_FILE)
+        if legacy_path:
+            return _read_analytics_json_file(legacy_path), legacy_path
+        return None, None
+    loaded = _read_analytics_json_file(ANALYTICS_FILE)
+    return loaded, None
+
+
+def _read_analytics_json_file(path: str) -> Optional[Dict[str, Any]]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+    except (IOError, json.JSONDecodeError) as e:
+        logger.warning("[Analytics] Failed to load analytics file %s: %s", path, e)
+        return None
+    if not isinstance(loaded, dict):
+        return None
+    return loaded
+
+
+def _sanitize_analytics_cache(loaded: Dict[str, Any]) -> Dict[str, Any]:
+    sanitized: Dict[str, Any] = {}
+    schema_value = loaded.get(ANALYTICS_SCHEMA_KEY)
+    if isinstance(schema_value, int):
+        sanitized[ANALYTICS_SCHEMA_KEY] = schema_value
+    for key, value in loaded.items():
+        if key == ANALYTICS_SCHEMA_KEY:
+            continue
+        if isinstance(value, dict):
+            sanitized[key] = value
+    return sanitized
+
+
+def _analytics_cache_needs_rebuild(cache: Dict[str, Any]) -> bool:
+    if not isinstance(cache, dict):
+        return True
+    if cache.get(ANALYTICS_SCHEMA_KEY) != ANALYTICS_SCHEMA_VERSION:
+        return True
+    return any(_invalid_analytics_bucket(key, value) for key, value in cache.items())
+
+
+def _invalid_analytics_bucket(key: str, value: Any) -> bool:
+    if key == ANALYTICS_SCHEMA_KEY:
+        return False
+    return not isinstance(value, dict) or "asr" not in value
+
+
+def _rebuild_and_persist_analytics(module: Any) -> None:
+    logger.info("[Analytics] Rebuilding analytics stats from task history...")
+    old_cache = dict(module.ANALYTICS_CACHE)
+    rebuild_analytics_from_history()
+    merge_legacy_analytics(old_cache, module.ANALYTICS_CACHE)
+    _persist_analytics_cache(module.ANALYTICS_CACHE)
+
+
+def _persist_analytics_cache(cache: Dict[str, Any]) -> None:
+    try:
+        os.makedirs(os.path.dirname(ANALYTICS_FILE), exist_ok=True)
+        tmp_file = f"{ANALYTICS_FILE}.tmp"
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=2)
+        os.replace(tmp_file, ANALYTICS_FILE)
+    except (IOError, OSError) as e:
+        logger.error("[Analytics] Failed to save rebuilt analytics: %s", e)
 
 
 def categorize_task(task_data: Dict[str, Any]) -> str:
     """
     Categorize task as 'asr', 'detectlang', or 'audio'.
     """
+    for matcher, category in _category_matchers():
+        if matcher(task_data):
+            return category
+    return "asr"
+
+
+def _category_matchers() -> list[tuple[Any, str]]:
+    return [
+        (_is_asr_endpoint, "asr"),
+        (_is_detect_endpoint, "detectlang"),
+        (_is_audio_endpoint, "audio"),
+        (_is_language_detection_type, "detectlang"),
+        (_is_audio_category_by_task_fields, "audio"),
+    ]
+
+
+def _is_asr_endpoint(task_data: Dict[str, Any]) -> bool:
     endpoint = task_data.get("endpoint", "")
-    if endpoint == "/asr":
-        cat = "asr"
-    elif endpoint and "detect" in endpoint:
-        cat = "detectlang"
-    elif endpoint and endpoint.startswith("/v1/audio/"):
-        cat = "audio"
-    elif task_data.get("type", "") == "Language Detection":
-        cat = "detectlang"
-    else:
-        t_type = task_data.get("type", "")
-        req_json = task_data.get("request_json", {}) or {}
-        if t_type == "Translation" or "response_format" in req_json:
-            cat = "audio"
-        else:
-            cat = "asr"
-    return cat
+    return endpoint in {"/asr", "/v1/audio/transcriptions", "/v1/audio/translations"}
+
+
+def _is_detect_endpoint(task_data: Dict[str, Any]) -> bool:
+    endpoint = task_data.get("endpoint", "")
+    return bool(endpoint and "detect" in endpoint)
+
+
+def _is_audio_endpoint(task_data: Dict[str, Any]) -> bool:
+    endpoint = task_data.get("endpoint", "")
+    return bool(endpoint and endpoint.startswith("/v1/audio/") and endpoint not in {"/v1/audio/transcriptions", "/v1/audio/translations"})
+
+
+def _is_language_detection_type(task_data: Dict[str, Any]) -> bool:
+    return task_data.get("type", "") == "Language Detection"
+
+
+def _is_audio_category_by_task_fields(task_data: Dict[str, Any]) -> bool:
+    task_type = task_data.get("type", "")
+    req_json = task_data.get("request_json", {}) or {}
+    return task_type == "Translation" or "response_format" in req_json
 
 
 def rebuild_analytics_from_history() -> None:
@@ -200,39 +268,52 @@ def rebuild_analytics_from_history() -> None:
     module = sys.modules[__name__]
     ensure_loaded()
     with ANALYTICS_LOCK:
-        new_cache = {}
+        new_cache = {ANALYTICS_SCHEMA_KEY: ANALYTICS_SCHEMA_VERSION}
         for task in module.HISTORY_CACHE:
-            if task.get("status") != "completed":
-                continue
-            dur = float(task.get("video_duration", 0.0))
-            c_at = task.get("completed_at", "")
-            if c_at:
-                date_str = c_at.split(" ")[0]
-            else:
-                date_str = datetime.fromtimestamp(task.get("start_time", time.time())).strftime("%Y-%m-%d")
-
-            category = categorize_task(task)
-            if date_str not in new_cache:
-                new_cache[date_str] = {
-                    "count": 0,
-                    "duration": 0.0,
-                    "asr": {"count": 0, "duration": 0.0},
-                    "detectlang": {"count": 0, "duration": 0.0},
-                    "audio": {"count": 0, "duration": 0.0},
-                }
-            day_data = new_cache[date_str]
-            for cat in ["asr", "detectlang", "audio"]:
-                if cat not in day_data:
-                    day_data[cat] = {"count": 0, "duration": 0.0}
-
-            day_data["count"] += 1
-            day_data["duration"] += dur
-            day_data[category]["count"] += 1
-            day_data[category]["duration"] += dur
+            _accumulate_task_into_daily_cache(new_cache, task)
 
         module.ANALYTICS_CACHE = new_cache
         module.STATS_CACHE = None
         module.STATS_CACHE_DATE = None
+
+
+def _accumulate_task_into_daily_cache(new_cache: Dict[str, Any], task: Dict[str, Any]) -> None:
+    if task.get("status") != "completed":
+        return
+    duration = float(task.get("video_duration", 0.0))
+    date_str = _extract_task_date(task)
+    category = categorize_task(task)
+    day_data = _ensure_daily_bucket(new_cache, date_str)
+    _ensure_daily_categories(day_data)
+    day_data["count"] += 1
+    day_data["duration"] += duration
+    day_data[category]["count"] += 1
+    day_data[category]["duration"] += duration
+
+
+def _extract_task_date(task: Dict[str, Any]) -> str:
+    completed_at = task.get("completed_at", "")
+    if completed_at:
+        return completed_at.split(" ")[0]
+    return datetime.fromtimestamp(task.get("start_time", time.time())).strftime("%Y-%m-%d")
+
+
+def _ensure_daily_bucket(cache: Dict[str, Any], date_str: str) -> Dict[str, Any]:
+    if date_str not in cache:
+        cache[date_str] = {
+            "count": 0,
+            "duration": 0.0,
+            "asr": {"count": 0, "duration": 0.0},
+            "detectlang": {"count": 0, "duration": 0.0},
+            "audio": {"count": 0, "duration": 0.0},
+        }
+    return cache[date_str]
+
+
+def _ensure_daily_categories(day_data: Dict[str, Any]) -> None:
+    for cat in ["asr", "detectlang", "audio"]:
+        if cat not in day_data:
+            day_data[cat] = {"count": 0, "duration": 0.0}
 
 
 def update_analytics(task_data: Dict[str, Any]) -> None:
@@ -243,48 +324,31 @@ def update_analytics(task_data: Dict[str, Any]) -> None:
         ensure_analytics_loaded()
         module = sys.modules[__name__]
         dur = float(task_data.get("video_duration", 0.0))
-
-        # Get completion date or current date
-        c_at = task_data.get("completed_at", "")
-        if c_at:
-            # Format: 2026-05-26 11:43:36 -> date: 2026-05-26
-            date_str = c_at.split(" ")[0]
-        else:
-            date_str = datetime.now().strftime("%Y-%m-%d")
+        date_str = _analytics_date_for_task(task_data)
 
         with ANALYTICS_LOCK:
-            if date_str not in module.ANALYTICS_CACHE:
-                module.ANALYTICS_CACHE[date_str] = {
-                    "count": 0,
-                    "duration": 0.0,
-                    "asr": {"count": 0, "duration": 0.0},
-                    "detectlang": {"count": 0, "duration": 0.0},
-                    "audio": {"count": 0, "duration": 0.0},
-                }
-
-            day_data = module.ANALYTICS_CACHE[date_str]
-            for cat in ["asr", "detectlang", "audio"]:
-                if cat not in day_data:
-                    day_data[cat] = {"count": 0, "duration": 0.0}
-
+            day_data = _ensure_daily_bucket(module.ANALYTICS_CACHE, date_str)
+            _ensure_daily_categories(day_data)
             category = categorize_task(task_data)
             day_data["count"] += 1
             day_data["duration"] += dur
             day_data[category]["count"] += 1
             day_data[category]["duration"] += dur
 
-            # Save to disk atomically
-            os.makedirs(config.STATE_DIR, exist_ok=True)
-            tmp_file = f"{ANALYTICS_FILE}.tmp"
-            with open(tmp_file, "w", encoding="utf-8") as f:
-                json.dump(module.ANALYTICS_CACHE, f, indent=2)
-            os.replace(tmp_file, ANALYTICS_FILE)
+            _persist_analytics_cache(module.ANALYTICS_CACHE)
 
         # Invalidate stats cache
         module.STATS_CACHE = None
         module.STATS_CACHE_DATE = None
     except (IOError, OSError, ValueError, TypeError) as e:
         logger.error("[Analytics] Failed to update analytics: %s", e)
+
+
+def _analytics_date_for_task(task_data: Dict[str, Any]) -> str:
+    completed_at = task_data.get("completed_at", "")
+    if completed_at:
+        return completed_at.split(" ")[0]
+    return datetime.now().strftime("%Y-%m-%d")
 
 
 def log_completed_task(task_data: Dict[str, Any]) -> None:
@@ -297,68 +361,12 @@ def log_completed_task(task_data: Dict[str, Any]) -> None:
     module = sys.modules[__name__]
     try:
         ensure_loaded()
-
-        # Add completion metadata
-        if "completed_at" not in task_data:
-            task_data["completed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        start_time = task_data.get("start_time", time.time())
-        start_active = task_data.get("start_active")
-
-        # Calculate total elapsed time
-        total_elapsed = round(time.time() - start_time, 2)
-        task_data["total_elapsed_sec"] = total_elapsed
-
-        # Try to extract precise queue time from the performance stats
-        perf = (task_data.get("result") or {}).get("performance", {}) or (task_data.get("response_json") or {}).get(
-            "performance", {}
-        )
-        perf_queue = perf.get("queue_sec")
-
-        if perf_queue is not None:
-            queue_elapsed = round(float(perf_queue), 2)
-            task_data["queue_elapsed_sec"] = queue_elapsed
-            task_data["active_elapsed_sec"] = round(max(0.0, total_elapsed - queue_elapsed), 2)
-        elif start_active is not None:
-            queue_elapsed = round(start_active - start_time, 2)
-            task_data["queue_elapsed_sec"] = queue_elapsed
-            task_data["active_elapsed_sec"] = round(max(0.0, total_elapsed - queue_elapsed), 2)
-        else:
-            # Task never got active (e.g. failed/aborted in queue)
-            task_data["queue_elapsed_sec"] = total_elapsed
-            task_data["active_elapsed_sec"] = 0.0
-
-        if "logs" in task_data:
-            task_data["log_count"] = len(task_data["logs"])
-
-        result = task_data.get("result", {}) or {}
-        task_type = task_data.get("type", "")
-        if task_type in ["Transcription", "Translation"]:
-            segments = result.get("segments", []) or []
-            task_data["segments_processed"] = len(segments)
-        elif task_type == "Language Detection":
-            task_data["segments_processed"] = result.get("segments_processed", 1)
-        else:
-            task_data["segments_processed"] = 0
-
-        if "result" in task_data:
-            res_keys = list(task_data["result"].keys())
-            text_len = len(str(task_data["result"].get("text", "")))
-            logger.info("[History] Saving task with result keys: %s (Text len: %d)", res_keys, text_len)
-        else:
-            logger.warning("[History] Saving task WITHOUT result field! Task: %s", task_data.get("task_id"))
-
-        # Memory Protection: Truncate very large segment lists before persisting.
-        # A 15h+ movie can produce 10K+ segments (2–5 MB per task entry).
-        # We keep the first 100 for history/dashboard preview; the client
-        # already received the full output from the HTTP response.
-        # Note: result.text (full SRT) is intentionally preserved.
-        if "result" in task_data:
-            res = task_data["result"]
-            segs = res.get("segments")
-            if segs and len(segs) > 100:
-                res["segments_total_count"] = len(segs)
-                res["segments_truncated"] = True
-                res["segments"] = segs[:100]
+        _ensure_completion_timestamp(task_data)
+        _compute_elapsed_fields(task_data)
+        _update_log_count(task_data)
+        _update_segments_processed(task_data)
+        _log_result_shape(task_data)
+        _truncate_large_segments(task_data)
 
         module.HISTORY_CACHE.insert(0, task_data.copy())
         module.HISTORY_CACHE = module.HISTORY_CACHE[:MAX_HISTORY_DISK]
@@ -377,6 +385,85 @@ def log_completed_task(task_data: Dict[str, Any]) -> None:
         logger.error("[History] Failed to log task history: %s", e)
 
 
+def _ensure_completion_timestamp(task_data: Dict[str, Any]) -> None:
+    if "completed_at" not in task_data:
+        task_data["completed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _compute_elapsed_fields(task_data: Dict[str, Any]) -> None:
+    start_time = task_data.get("start_time", time.time())
+    start_active = task_data.get("start_active")
+    total_elapsed = round(time.time() - start_time, 2)
+    task_data["total_elapsed_sec"] = total_elapsed
+
+    perf_queue = _extract_perf_queue_seconds(task_data)
+    if perf_queue is not None:
+        _set_elapsed_from_queue(task_data, total_elapsed, perf_queue)
+        return
+    if start_active is not None:
+        _set_elapsed_from_start_active(task_data, start_time, start_active, total_elapsed)
+        return
+    task_data["queue_elapsed_sec"] = total_elapsed
+    task_data["active_elapsed_sec"] = 0.0
+
+
+def _extract_perf_queue_seconds(task_data: Dict[str, Any]) -> Optional[float]:
+    perf = (task_data.get("result") or {}).get("performance", {}) or (task_data.get("response_json") or {}).get("performance", {})
+    value = perf.get("queue_sec")
+    if value is None:
+        return None
+    return float(value)
+
+
+def _set_elapsed_from_queue(task_data: Dict[str, Any], total_elapsed: float, perf_queue: float) -> None:
+    queue_elapsed = round(perf_queue, 2)
+    task_data["queue_elapsed_sec"] = queue_elapsed
+    task_data["active_elapsed_sec"] = round(max(0.0, total_elapsed - queue_elapsed), 2)
+
+
+def _set_elapsed_from_start_active(task_data: Dict[str, Any], start_time: float, start_active: float, total_elapsed: float) -> None:
+    queue_elapsed = round(start_active - start_time, 2)
+    task_data["queue_elapsed_sec"] = queue_elapsed
+    task_data["active_elapsed_sec"] = round(max(0.0, total_elapsed - queue_elapsed), 2)
+
+
+def _update_log_count(task_data: Dict[str, Any]) -> None:
+    if "logs" in task_data:
+        task_data["log_count"] = len(task_data["logs"])
+
+
+def _update_segments_processed(task_data: Dict[str, Any]) -> None:
+    result = task_data.get("result", {}) or {}
+    task_type = task_data.get("type", "")
+    if task_type in ["Transcription", "Translation"]:
+        task_data["segments_processed"] = len(result.get("segments", []) or [])
+    elif task_type == "Language Detection":
+        task_data["segments_processed"] = result.get("segments_processed", 1)
+    else:
+        task_data["segments_processed"] = 0
+
+
+def _log_result_shape(task_data: Dict[str, Any]) -> None:
+    if "result" in task_data:
+        res_keys = list(task_data["result"].keys())
+        text_len = len(str(task_data["result"].get("text", "")))
+        logger.info("[History] Saving task with result keys: %s (Text len: %d)", res_keys, text_len)
+        return
+    logger.warning("[History] Saving task WITHOUT result field! Task: %s", task_data.get("task_id"))
+
+
+def _truncate_large_segments(task_data: Dict[str, Any]) -> None:
+    if "result" not in task_data:
+        return
+    result = task_data["result"]
+    segments = result.get("segments")
+    if not segments or len(segments) <= 100:
+        return
+    result["segments_total_count"] = len(segments)
+    result["segments_truncated"] = True
+    result["segments"] = segments[:100]
+
+
 def flush_history() -> None:
     """
     Synchronizes the RAM cache to the physical SSD.
@@ -384,40 +471,53 @@ def flush_history() -> None:
     """
     module = sys.modules[__name__]
     try:
-        os.makedirs(config.STATE_DIR, exist_ok=True)
-
-        # 1. Load existing disk history to merge
-        disk_history = []
-        if os.path.exists(HISTORY_FILE):
-            try:
-                with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                    disk_history = json.load(f)
-            except (IOError, json.JSONDecodeError):
-                disk_history = []
-
-        # 2. Merge with RAM cache (deduplicate by task_id)
-        # RAM cache tasks are the newest.
-        seen_ids = {t.get("task_id") for t in module.HISTORY_CACHE if t.get("task_id")}
-        merged = list(module.HISTORY_CACHE)
-        for t in disk_history:
-            tid = t.get("task_id")
-            if tid and tid not in seen_ids:
-                merged.append(t)
-                seen_ids.add(tid)
-
-        # 3. Limit to MAX_HISTORY_DISK (1000)
-        data_to_save = merged[:MAX_HISTORY_DISK]
-
-        # 4. Atomic write
-        tmp_file = f"{HISTORY_FILE}.tmp"
-        with open(tmp_file, "w", encoding="utf-8") as f:
-            json.dump(data_to_save, f, indent=2)
-        os.replace(tmp_file, HISTORY_FILE)
+        os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
+        disk_history = _load_disk_history()
+        merged = _merge_history_cache(module.HISTORY_CACHE, disk_history)
+        _persist_history_data(merged[:MAX_HISTORY_DISK])
 
         module.UNSAVED_COUNT = 0
         module.LAST_SYNC = time.time()
     except (IOError, OSError) as e:
         logger.error("[History] SSD Sync Failed: %s", e)
+
+
+def _load_disk_history() -> List[Dict[str, Any]]:
+    loaded = _read_history_file_entries()
+    if loaded is None:
+        return []
+    return [entry for entry in loaded if isinstance(entry, dict)]
+
+
+def _read_history_file_entries() -> Optional[List[Any]]:
+    if not os.path.exists(HISTORY_FILE):
+        return None
+    return load_json_list_file(HISTORY_FILE)
+
+
+def _merge_history_cache(ram_history: List[Dict[str, Any]], disk_history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    seen_ids = {t.get("task_id") for t in ram_history if t.get("task_id")}
+    merged = list(ram_history)
+    for task in disk_history:
+        _append_history_task_if_new(task, seen_ids, merged)
+    return merged
+
+
+def _append_history_task_if_new(task: Dict[str, Any], seen_ids: set, merged: List[Dict[str, Any]]) -> None:
+    task_id = task.get("task_id")
+    if not task_id:
+        return
+    if task_id in seen_ids:
+        return
+    merged.append(task)
+    seen_ids.add(task_id)
+
+
+def _persist_history_data(data_to_save: List[Dict[str, Any]]) -> None:
+    tmp_file = f"{HISTORY_FILE}.tmp"
+    with open(tmp_file, "w", encoding="utf-8") as f:
+        json.dump(data_to_save, f, indent=2)
+    os.replace(tmp_file, HISTORY_FILE)
 
 
 def get_history() -> List[Dict[str, Any]]:
@@ -452,45 +552,12 @@ def get_history_stats() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         return history, module.STATS_CACHE
 
     ensure_analytics_loaded()
-
-    stats = {
-        "all_time": 0.0,
-        "today": 0.0,
-        "this_month": 0.0,
-        "this_year": 0.0,
-        "count_all_time": 0,
-        "count_today": 0,
-        "asr": {"count": 0, "duration": 0.0},
-        "detectlang": {"count": 0, "duration": 0.0},
-        "audio": {"count": 0, "duration": 0.0},
-    }
-
+    stats = new_stats_payload()
     month_str = now.strftime("%Y-%m")
     year_str = now.strftime("%Y")
-
     with ANALYTICS_LOCK:
         analytics_snapshot = deepcopy(module.ANALYTICS_CACHE) if module.ANALYTICS_CACHE else {}
-
-    if analytics_snapshot:
-        for date_str, daily_data in analytics_snapshot.items():
-            dur = daily_data.get("duration", 0.0)
-            cnt = daily_data.get("count", 0)
-
-            stats["all_time"] += dur
-            stats["count_all_time"] += cnt
-
-            if date_str == today_str:
-                stats["today"] += dur
-                stats["count_today"] += cnt
-            if date_str.startswith(month_str):
-                stats["this_month"] += dur
-            if date_str.startswith(year_str):
-                stats["this_year"] += dur
-
-            for cat in ["asr", "detectlang", "audio"]:
-                cat_data = daily_data.get(cat, {})
-                stats[cat]["count"] += cat_data.get("count", 0)
-                stats[cat]["duration"] += cat_data.get("duration", 0.0)
+    accumulate_stats(stats, analytics_snapshot, today_str, month_str, year_str)
 
     module.STATS_CACHE = stats
     module.STATS_CACHE_DATE = today_str

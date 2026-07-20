@@ -19,7 +19,7 @@ Subtitle output now carries Plex-compatible `<language>-ai` naming so tracks app
 - **Dedicated Core Package**: Consolidated all core runtime modules (`config`, `constants`, `utils`, `logging_setup`, `bootstrap`, `subtitles`) under a new `modules.core` sub-package for logical grouping and cleaner namespace management.
 - **Eliminated Compatibility Wrappers (Breaking for Python Imports)**: Removed all top-level wrapper modules that previously re-exported from `modules.core`; Python code importing `modules.config`, `modules.utils`, etc. must switch to canonical `modules.core.*` paths.
 - **Simplified Import Discipline**: All application code (~80 files), tests (~25 files), and documentation now use direct imports from `modules.core`, eliminating the cognitive overhead of dual import paths and potential version mismatches.
-- **Priority Test Grouping**: Consolidated priority scheduling and preemption tests under a dedicated `tests/inference/priority/` sub-package, improving test discoverability and logical organization.
+- **Priority Test Grouping**: Consolidated priority scheduling and preemption tests under a dedicated `tests/inference/scheduler/priority/` sub-package, improving test discoverability and logical organization.
 
 ### 📊 Endpoint-Separated Analytics Metrics
 
@@ -106,7 +106,7 @@ Subtitle output now carries Plex-compatible `<language>-ai` naming so tracks app
 | `modules/subtitles.py` → `modules/core/subtitles.py` | Subtitle generation and text wrapping. |
 | `modules/api/routes_asr.py` | Plex AI subtitle filename tagging (`<lang>-ai.<fmt>`), `subtitle_highlight_words` parameter. |
 | `modules/api/routes_system.py` | Atomic in-memory log read for `GET /logs/download` (fixes download race condition). |
-| `tests/inference/test_priority_*.py` | Relocated to `tests/inference/priority/test_priority_*.py`. |
+| `tests/inference/test_priority_*.py` | Relocated to `tests/inference/scheduler/priority/test_priority_*.py`. |
 | All imports across codebase | Updated from `modules.<name>` to `modules.core.<name>` (55 files). |
 
 ---

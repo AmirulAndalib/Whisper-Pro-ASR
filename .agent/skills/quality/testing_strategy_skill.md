@@ -90,9 +90,9 @@ def test_task_ordering_deterministic_across_calls():
     for call_num in range(1, 5):
         assert orderings[call_num] == orderings[0], f"Ordering changed between call 0 and call {call_num}"
 
-def test_task_ordering_active_first_priority_then_standard():
-    """Verify active tasks render first, then priority-queued, then standard-queued."""
-    # Create mixed tasks: 2 active, 2 priority-queued, 2 standard-queued
+def test_task_ordering_active_first_then_non_active_by_start_time():
+  """Verify active tasks render first, then all non-active tasks by start_time."""
+  # Create mixed tasks: 2 active, 1 queued-priority, 2 queued-standard
     active_tasks = [enqueue_asr_task() for _ in range(2)]
     for task_id in active_tasks:
         wait_for_status(task_id, 'active', timeout=3)
@@ -111,17 +111,27 @@ def test_task_ordering_active_first_priority_then_standard():
     
     # Find indices
     active_indices = [task_ids.index(tid) for tid in active_tasks]
-    priority_indices = [task_ids.index(priority_task)]
+    priority_index = task_ids.index(priority_task)
     standard_indices = [task_ids.index(tid) for tid in standard_tasks]
+    task_by_id = {t['task_id']: t for t in status_data['tasks']}
     
-    # Verify ordering: all active indices < all priority indices < all standard indices
+    # Verify ordering: all active indices < all non-active indices, with time ordering inside non-active.
     max_active = max(active_indices) if active_indices else -1
-    min_priority = min(priority_indices) if priority_indices else float('inf')
-    max_priority = max(priority_indices) if priority_indices else -1
-    min_standard = min(standard_indices) if standard_indices else float('inf')
+    min_non_active = min([priority_index] + standard_indices) if standard_indices else priority_index
+    non_active_ids = [tid for tid in task_ids if task_by_id[tid].get('status') != 'active']
+    expected_non_active = sorted(
+      non_active_ids,
+      key=lambda tid: (task_by_id[tid].get('start_time', 0), tid),
+    )
+    expected_active = sorted(
+      active_tasks,
+      key=lambda tid: (task_by_id[tid].get('start_time', 0), tid),
+    )
     
-    assert max_active < min_priority, f"Active tasks should appear before priority queued"
-    assert max_priority < min_standard, f"Priority queued should appear before standard queued"
+    assert max_active < min_non_active, f"Active tasks should appear before all non-active tasks"
+    assert non_active_ids == expected_non_active, "Non-active tasks must be sorted by start_time then task_id"
+    assert [tid for tid in task_ids if tid in active_tasks] == expected_active, "Active tasks must be sorted by start_time then task_id"
+    assert priority_task in non_active_ids, "Priority task should remain in the non-active group ordering"
 ```
 
 ### 3. Frontend Status Rendering Matrix Test
@@ -220,7 +230,7 @@ describe('Task Status Rendering (All 7 Statuses)', () => {
 
 ```bash
 # Backend status/ordering tests
-.venv/bin/python -m pytest tests/monitoring/ tests/inference/test_scheduler.py tests/inference/priority/test_priority_concurrency.py -v -k "status or order or preemption"
+.venv/bin/python -m pytest tests/monitoring/ tests/inference/scheduler/test_scheduler.py tests/inference/scheduler/test_scheduler_priority_and_fifo.py tests/inference/scheduler/test_scheduler_pause_and_metadata.py tests/inference/scheduler/priority/test_priority_concurrency.py tests/inference/scheduler/priority/test_priority_concurrency_core_tests.py tests/inference/scheduler/priority/test_priority_concurrency_extended_tests.py -v -k "status or order or preemption"
 
 # Frontend status rendering tests
 npm run test:js -- tests/dashboard_main.test.js --coverage
@@ -238,3 +248,4 @@ npm run test:js -- tests/dashboard_main.test.js --coverage
 - Ordering determinism test confirms stable sort across calls.
 - Frontend rendering test validates all 7 statuses render correctly.
 - Paused-vs-waiting hint distinction validated in frontend test.
+

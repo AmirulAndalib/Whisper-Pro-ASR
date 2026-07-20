@@ -7,16 +7,17 @@ from unittest import mock
 import modules.core.config as config_module
 
 
-def test_subtitle_promo_configs():
-    """Test subtitle promo configurations parsing from environment."""
-    # Test defaults
+def test_subtitle_promo_configs_defaults():
+    """Subtitle promo settings should use the documented defaults."""
     with mock.patch.dict(os.environ, {}, clear=True):
         importlib.reload(config_module)
         assert config_module.SUBTITLE_PROMO_ENABLED is True
         assert config_module.SUBTITLE_PROMO_TEXT == "Made with Whisper Pro ASR"
         assert config_module.SUBTITLE_PROMO_DURATION == 3.0
 
-    # Test custom
+
+def test_subtitle_promo_configs_custom_values():
+    """Subtitle promo settings should read custom environment values."""
     env = {
         "SUBTITLE_PROMO_ENABLED": "false",
         "SUBTITLE_PROMO_TEXT": "Promo Test",
@@ -28,7 +29,9 @@ def test_subtitle_promo_configs():
         assert config_module.SUBTITLE_PROMO_TEXT == "Promo Test"
         assert config_module.SUBTITLE_PROMO_DURATION == 5.5
 
-    # Test duration fallback
+
+def test_subtitle_promo_configs_duration_fallback():
+    """Invalid duration values should fall back to the default duration."""
     env = {"SUBTITLE_PROMO_DURATION": "invalid-float"}
     with mock.patch.dict(os.environ, env):
         importlib.reload(config_module)

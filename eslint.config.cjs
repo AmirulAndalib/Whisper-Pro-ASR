@@ -2,7 +2,7 @@ const globals = require("globals");
 
 module.exports = [
   {
-    files: ["modules/monitoring/templates/*.js"],
+    files: ["modules/monitoring/templates/**/*.js"],
     languageOptions: {
       ecmaVersion: "latest",
       sourceType: "script",
@@ -61,6 +61,7 @@ module.exports = [
       "no-undef": "error",
       eqeqeq: ["error", "always"],
       "no-var": "error",
+      complexity: ["error", 5],
     },
   },
   {

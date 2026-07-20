@@ -4,9 +4,13 @@ __pycache__/
 *$py.class
 .env
 .venv
+.venv_bak/
 env/
 venv/
 ENV/
+
+# Docker build artifacts
+.buildx-cache
 
 # Model Caches (OpenVINO Blobs)
 model_cache/
@@ -50,8 +54,11 @@ test_data/
 test_state/
 pylint_report.txt
 
-# Runtime local logs (keep local only)
-data/whisper_pro.log
+# Runtime local state/logs (keep local only)
+data/
+/*.log
+/.tmp*_log.txt
+/*.tmp.log
 
 # Node / Frontend Quality Tooling
 node_modules/

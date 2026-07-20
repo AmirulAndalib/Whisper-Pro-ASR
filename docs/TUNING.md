@@ -30,6 +30,11 @@ The scheduler uses queued waiting and cooperative yielding under contention. Tun
 
 > [!NOTE]
 > The OpenVINO mode and stream count are now automatically optimized based on your `ASR_BATCH_SIZE`. You can manually override them using `OV_PERFORMANCE_HINT` and `OV_NUM_STREAMS`.
+>
+> UVR preprocessing uses a dedicated OpenVINO configuration for stability under mixed GPU/NPU detect-language bursts:
+>
+> - OpenVINO UVR sessions are pinned to `num_streams=1`.
+> - OpenVINO UVR cache is partitioned per accelerator family (`.../uvr/gpu`, `.../uvr/npu`) to avoid first-batch cross-device cache contention.
 
 ## Changing Quantization
 
@@ -47,7 +52,7 @@ Then rebuild: `docker compose up -d --build`
 
 ## Long Movies (4h+)
 
-- **Intel ASR Chunking & Streaming**: For OpenVINO engine transcription, set `INTEL_ASR_CHUNK_DURATION` (default `300` seconds) to chunk audio processing. This prevents execution hangs and out-of-memory errors on massive files while maintaining continuous progress metrics.
+- **Intel ASR Chunking & Streaming**: For Intel Whisper runtime workloads, set `INTEL_ASR_CHUNK_DURATION` (default `300` seconds) to chunk audio processing. This keeps long jobs bounded and preserves continuous progress metrics. The `INTEL-WHISPER` engine still falls back to `FASTER-WHISPER` when Intel GPU/NPU execution is unavailable.
 - **UVR Preprocessing Chunking**: Set `UVR_CHUNK_DURATION` (default `600` seconds / 10 minutes) to segment vocal separation. This caps peak RAM utilization and enables periodic chunk-level progress updates on the dashboard.
 - **Bazarr timeout**: Set to `36000` (10 hours) for high reliability.
 - **RAM**: 32GB recommended for language detection on extremely large libraries.
@@ -90,7 +95,8 @@ environment:
   - AGGRESSIVE_OFFLOAD=true
 ```
 
-Models are immediately unloaded from memory when all active sessions complete. This is ideal for shared-resource environments where RAM must be reclaimed as fast as possible.
+Models are immediately unloaded from memory when all active sessions complete and no tasks remain waiting in the queue. This is ideal for shared-resource environments where RAM must be reclaimed as fast as possible without interrupting work that is already queued.
+Reclaim logs report process RSS explicitly (`RAM(RSS)`) and, on NVIDIA hosts with `nvidia-smi` available, include CUDA VRAM before/after plus delta.
 
 ### Idle Timeout
 
@@ -116,7 +122,7 @@ The service supports multiple ASR backend engines to run inference. You can conf
   - `Intel NPU` resolves to `INTEL-WHISPER`
   - `CPU` resolves to `FASTER-WHISPER`
 - **`FASTER-WHISPER`** (Default): Uses the CTranslate2 engine. This is the recommended choice for general CPU and NVIDIA CUDA environments, offering extremely fast processing and low memory footprint.
-- **`INTEL-WHISPER`**: Uses the OpenVINO-based Intel Whisper engine (`IntelWhisperEngine`). Highly optimized for Intel NPUs and Integrated/Arc GPUs. If Intel GPU/NPU is unavailable, runtime falls back to `FASTER-WHISPER` (not OpenVINO CPU).
+- **`INTEL-WHISPER`**: Uses the Intel Whisper engine (`IntelWhisperEngine`). It is optimized for Intel NPUs and Integrated/Arc GPUs. If Intel GPU/NPU execution is unavailable, runtime falls back to `FASTER-WHISPER`.
 - **`OPENAI-WHISPER`**: Uses the reference OpenAI Whisper Python backend.
 - **`WHISPERX`**: Uses the WhisperX backend, supporting batch inference.
 

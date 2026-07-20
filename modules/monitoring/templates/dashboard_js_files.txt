@@ -1,4 +1,9 @@
-dashboard_state.js
-dashboard_utils.js
-dashboard_charts.js
-dashboard_main.js
+dashboard/core/state.js
+dashboard/core/utils.js
+dashboard/features/charts.js
+dashboard/features/audit.js
+dashboard/features/task_filter_history.js
+dashboard/features/speed_status.js
+dashboard/features/active_tasks.js
+dashboard/features/runtime.js
+dashboard/main.js

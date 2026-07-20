@@ -3,7 +3,7 @@ const path = require("path");
 const { JSDOM } = require("jsdom");
 const { loadScriptInContext } = require("./helpers");
 
-describe("dashboard_utils.js", () => {
+describe("utils.js", () => {
   let dom;
   let context;
 
@@ -11,7 +11,7 @@ describe("dashboard_utils.js", () => {
     dom = new JSDOM("<!doctype html><html><body></body></html>");
     const alertMock = vi.fn();
     context = loadScriptInContext(
-      path.join(__dirname, "../../modules/monitoring/templates/dashboard_utils.js"),
+      path.join(__dirname, "../../modules/monitoring/templates/dashboard/core/utils.js"),
       {
         window: dom.window,
         document: dom.window.document,

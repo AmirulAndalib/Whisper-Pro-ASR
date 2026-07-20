@@ -28,7 +28,7 @@ Returns hardware pool status, active sessions, telemetry history, and version.
 
 ### `POST /detect-language`
 
-Detect audio language with **High Priority**. All media inputs are automatically standardized to **16kHz Mono/Stereo WAV** before entering the voting consensus, ensuring maximum compatibility across Intel iGPU/NPU and NVIDIA backends.
+Detect audio language with **High Priority**. All ingested audio is automatically standardized to **16kHz, mono, 16-bit PCM WAV** before entering the voting consensus, ensuring maximum compatibility across Intel iGPU/NPU and NVIDIA backends.
 
 `/detectlang` is a compatibility alias with identical behavior.
 
@@ -98,7 +98,7 @@ Transcribe audio to SRT/VTT/JSON with optional speaker diarization. All incoming
 When `diarize=true`, the service runs the WhisperX post-processing pipeline:
 
 1. **Alignment**: Aligns transcription segments to audio using `whisperx.align`.
-2. **Diarization**: Identifies speakers using `whisperx.diarization.DiarizationPipeline` (requires `HF_TOKEN`).
+2. **Diarization**: Identifies speakers using `whisperx.diarization.DiarizationPipeline` (requires `DIARIZATION_HF_TOKEN` or request `hf_token`).
 3. **Speaker Assignment**: Maps speaker IDs to segments via `whisperx.assign_word_speakers`.
 
 Output formats (SRT, VTT, TXT, TSV) will include speaker labels (e.g., `[SPEAKER_00]: Hello world`).
@@ -116,6 +116,7 @@ All subtitle responses are returned with a structured filename of the form `<sou
 
 - **Live Stream**: Monitor progress via real-time SRT stream on the dashboard.
 - **Persistence**: Completed transcriptions are saved to persistent history for download.
+- **Hardware Selection Log**: Before inference begins, the runtime logs which hardware unit (`unit_id`) will execute the transcription/translation task.
 - **Performance Auditing**: JSON responses include a `performance` object with `queue_sec`, `isolation_sec`, and `inference_sec`.
 - **Iconography**: Identified on the dashboard with a `record_voice_over` icon and `/asr` label.
 

@@ -29,11 +29,7 @@ Dashboard task list MUST always render in this **exact** order:
    - Tie-break by `task_id` lexicographic order
    - No priority override inside active tier (pure time order)
 
-2. **Then Priority Queued Tasks** (all `status='queued'` with `is_priority=true`)
-   - Sort by `start_time` ascending
-   - Tie-break by `task_id` lexicographic order
-
-3. **Then Standard Queued Tasks** (all `status='queued'` with `is_priority=false`)
+2. **Then all Non-Active Tasks** (`queued`, `initializing`, `post-processing`, `completed`, `failed`)
    - Sort by `start_time` ascending
    - Tie-break by `task_id` lexicographic order
 
@@ -69,8 +65,15 @@ Dashboard task list MUST always render in this **exact** order:
 
 - Active tasks with stage containing "inference"/"transcrib" count toward ASR utilization.
 - Active tasks with stage containing "isolation"/"uvr"/"separation" count toward UVR utilization.
+- Tasks in other stages (for example initialization, standardization, file I/O, or post-processing without active accelerator work) must not light up Intel GPU/NPU or CUDA fallback utilization.
 - Utilization % calculated as: `(actual_active_count) / hardware_unit_count * 100`.
 - Queued tasks do NOT count toward utilization (they are not consuming hardware).
+- CUDA utilization is sourced from `nvidia-smi`.
+- Intel GPU and NPU utilization should prefer native Linux device counters, scan all matching paths for the active unit, preserve zero as a valid native reading, and then fall back to Windows performance counters and finally task/activity inference.
+- CUDA utilization should prefer `nvidia-smi`, and only then use synthetic task/activity fallback when direct polling is unavailable.
+- Dashboard rendering must continue to read `telemetry.hardware_util` keyed by unit id, with legacy singleton fields treated as compatibility-only fallback paths.
+- Telemetry history snapshots should preserve `hardware_util` so the hardware chart can replay per-unit GPU/NPU/CUDA usage instead of flattening history to legacy aggregate fields.
+- History cards should display the hardware unit used for execution. If runtime `unit_id` is cleared during post-processing, the dashboard must fall back to persisted history hardware fields (for example `history_unit_id`).
 
 ### 5. Live Progress Updates
 
@@ -78,6 +81,8 @@ Dashboard task list MUST always render in this **exact** order:
 - Task progress fields (`current_position`, `progress`, `stage`) update in-place without removing/re-adding task card.
 - Log buffers auto-scroll to bottom on update.
 - Chart downsampling: server limits to 300 points; client applies additional downsampling for browser performance.
+- Hardware acceleration chart labeling/style contract: each non-CPU series custom legend badge must include `type + unit id` (for example `CUDA CUDA:0 - NVIDIA GPU 0`) and use deterministic per-type differentiation so overlapping lines remain readable (CUDA solid/circle, Intel GPU dashed/square, NPU short-dashed/triangle). Marker cadence on the chart line must also vary per unit so symbols appear at different intervals across series.
+- Multi-unit fallback contract: if `telemetry.hardware_util` is absent, dashboard rendering must still resolve per-unit values (not singleton type values) for repeated unit types by using unit-ID keyed and index-based legacy fields for CUDA, Intel GPU, and NPU units.
 
 ## Status Payload Contract
 
@@ -108,7 +113,7 @@ Dashboard task list MUST always render in this **exact** order:
 
 ```bash
 # Run full monitoring + concurrency test suite
-.venv/bin/python -m pytest tests/monitoring/ tests/inference/test_scheduler.py tests/inference/priority/ -v -k "status or order or preemption"
+.venv/bin/python -m pytest tests/monitoring/ tests/inference/scheduler/test_scheduler.py tests/inference/scheduler/priority/ -v -k "status or order or preemption"
 
 # Run telemetry-specific tests
 .venv/bin/python -m pytest tests/monitoring/test_telemetry_loop.py tests/monitoring/test_history_manager.py -q
@@ -126,7 +131,7 @@ curl -s http://localhost:9000/status | jq '.tasks[] | {task_id, status, stage, s
 
 ## Frontend Rendering Alignment
 
-The frontend dashboard (dashboard_main.js) MUST implement status rendering per these rules:
+The frontend dashboard feature scripts (`dashboard/features/runtime.js` and `dashboard/features/speed_status.js`) MUST implement status rendering per these rules:
 
 1. **Badge Colors & Icons**:
    - active → badge-active, sync icon with pulse
@@ -147,7 +152,8 @@ The frontend dashboard (dashboard_main.js) MUST implement status rendering per t
    ```
 
 3. **Task Ordering in Rendered List**:
-   - Must match backend ordering rules (active first, then priority queued, then standard queued)
+   - Must match backend ordering rules (active first, then one non-active tier)
+   - Non-active tasks sort by `start_time` ascending, tie-break by `task_id` lexicographic order
    - Sort function must be deterministic and repeated calls produce same order
 
 ## Change Impact & Validation
@@ -174,3 +180,4 @@ Any code change touching the following MUST be validated against these rules:
 - Telemetry and history tests pass: all 7 status values appear correctly in aggregations.
 - No broken status payload fields.
 - Frontend tests pass with ≥90% lines/statements coverage (branches/functions pragmatic).
+

@@ -129,9 +129,7 @@ def test_error_handlers_and_teardown_exception(whisper_pro_asr):
 
     # 2. Test 500 server error handler
     # Mock modules.monitoring.dashboard.get_dashboard_html to raise an exception
-    with mock.patch(
-        "modules.monitoring.dashboard.get_dashboard_html", side_effect=ValueError("Simulated server error")
-    ):
+    with mock.patch("modules.monitoring.dashboard.get_dashboard_html", side_effect=ValueError("Simulated server error")):
         resp = client.get("/", headers={"Accept": "text/html"})
         assert resp.status_code == 500
 
@@ -154,7 +152,7 @@ async def test_whisper_pro_asr_lifespan_testing_false(whisper_pro_asr):
     mock_app = mock.MagicMock()
     mock_app.state.testing = False
 
-    with mock.patch("modules.inference.model_manager.init_pool") as mock_init:
+    with mock.patch("modules.inference.runtime.model_manager.init_pool") as mock_init:
         with mock.patch("modules.monitoring.telemetry.start_telemetry_loop") as mock_telemetry:
             async with whisper_pro_asr.lifespan(mock_app):
                 pass
@@ -162,12 +160,11 @@ async def test_whisper_pro_asr_lifespan_testing_false(whisper_pro_asr):
             mock_telemetry.assert_called_once()
 
 
-def test_custom_swagger_ui_html(whisper_pro_asr):
-    """Verify the customized Swagger documentation HTML route works."""
+def test_custom_swagger_ui_html_uses_local_static_assets(whisper_pro_asr):
+    """Swagger UI should use local static assets when they exist."""
     app = whisper_pro_asr.create_app(testing=True)
     client = FlaskCompatibleClient(app)
 
-    # 1. Test when static files exist locally
     with mock.patch("os.path.exists", return_value=True):
         resp = client.get("/docs")
         assert resp.status_code == 200
@@ -175,7 +172,12 @@ def test_custom_swagger_ui_html(whisper_pro_asr):
         assert "/static/swagger-ui-bundle.js" in html
         assert "/static/swagger-theme.css" in html
 
-    # 2. Test when static files do not exist (falls back to CDN references)
+
+def test_custom_swagger_ui_html_falls_back_to_cdn(whisper_pro_asr):
+    """Swagger UI should fall back to CDN references when static assets are missing."""
+    app = whisper_pro_asr.create_app(testing=True)
+    client = FlaskCompatibleClient(app)
+
     with mock.patch("os.path.exists", return_value=False):
         resp = client.get("/docs")
         assert resp.status_code == 200

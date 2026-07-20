@@ -9,9 +9,13 @@ Keep frontend quality gates deterministic and enforceable in local runs and CI.
 ## Scope
 
 - HTML in `modules/monitoring/templates/*.html`
-- JavaScript in `modules/monitoring/templates/*.js`
+- JavaScript in `modules/monitoring/templates/dashboard/**/*.js` and `modules/monitoring/templates/analytics/**/*.js`
 - CSS in `static/**/*.css` and `modules/monitoring/templates/**/*.css`
 - JS tests in `tests/js/**/*.test.js`
+
+Load-order contract note:
+
+- Dashboard and analytics scripts are concatenated via manifest order (`dashboard_js_files.txt` and `analytics_js_files.txt`), not ESM imports. Test fixtures and script loaders must preserve the same ordering.
 
 ## Required Gates
 
@@ -50,8 +54,8 @@ Keep frontend quality gates deterministic and enforceable in local runs and CI.
 
 ## Done Criteria
 
-- `npm run quality:frontend` passes locally.
-- `npm run test:e2e` passes locally.
-- `npm audit --audit-level=low` passes locally.
-- CI job executes same frontend gates.
-- README and relevant `.agent` docs reflect any changes to commands/policies.
+- The Docker-based lint build stage passes.
+- `tests/run_suite.sh` runs and passes all frontend/E2E test suites inside the Docker test image.
+- Host-based execution of frontend lints and audits is forbidden; all validation must happen inside Docker.
+- Playwright browser binaries are installed automatically inside the Docker test image before E2E execution.
+- README and relevant `.agent` docs reflect the Docker-only execution policy.
