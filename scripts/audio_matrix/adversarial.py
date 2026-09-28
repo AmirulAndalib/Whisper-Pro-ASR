@@ -11,6 +11,7 @@ transcribe. It is to prove it fails *gracefully and promptly* rather than return
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Callable
 
@@ -31,11 +32,23 @@ def _source(params: dict, context: dict) -> Path:
     Every manifest entry names a flat sibling clip (``en_core``), so requiring the
     resolved path to sit directly in ``root`` costs nothing and rejects traversal.
     """
-    root = context["root"].resolve()
-    clip = (root / f"{params['source']}.wav").resolve()
-    if clip.parent != root:
+    clip = _inside_root(context["root"] / f"{params['source']}.wav", context)
+    if clip is None:
         raise ValueError(f"fixture source {params['source']!r} resolves outside the audio matrix root")
     return clip
+
+
+def _inside_root(path: Path, context: dict) -> Path | None:
+    """``path`` resolved, when it names a file directly in the matrix root; otherwise None."""
+    # Plain os.path strings and a startswith() prefix check, rather than Path.resolve()
+    # and is_relative_to(): both are correct, but only this form is a validator
+    # SonarQube's taint analysis recognises (pythonsecurity:S2083), and a manifest
+    # ``source`` flows from here into read_bytes() and ffmpeg.
+    root = os.path.realpath(context["root"])
+    candidate = os.path.realpath(path)
+    if candidate.startswith(root + os.sep) and os.path.dirname(candidate) == root:
+        return Path(candidate)
+    return None
 
 
 def build_silence(dest: Path, params: dict, context: dict) -> None:
@@ -101,7 +114,21 @@ def build_tiny(dest: Path, params: dict, context: dict) -> None:
 
 def build_truncated_header(dest: Path, params: dict, context: dict) -> None:
     """A file that begins announcing itself as a WAV and then stops."""
-    dest.write_bytes(_source(params, context).read_bytes()[:TRUNCATED_HEADER_BYTES])
+    # dest derives from the manifest entry id, so it is confined like every source is.
+    if _inside_root(dest, context) is None:
+        raise ValueError(f"fixture destination {dest} resolves outside the audio matrix root")
+    # The prefix checks are repeated next to the open() calls on purpose: SonarQube's taint
+    # analysis only credits a validator in the same flow as the sink (pythonsecurity:S2083),
+    # so the confinement done inside _inside_root/_source is invisible to it here.
+    root = os.path.realpath(context["root"]) + os.sep
+    source = os.path.realpath(_source(params, context))
+    target = os.path.realpath(dest)
+    if not (source.startswith(root) and target.startswith(root)):
+        raise ValueError(f"fixture paths for {dest} resolve outside the audio matrix root")
+    with open(source, "rb") as src:
+        header = src.read(TRUNCATED_HEADER_BYTES)
+    with open(target, "wb") as out:
+        out.write(header)
 
 
 def build_zero_byte(dest: Path, _params: dict, _context: dict) -> None:
