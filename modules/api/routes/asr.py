@@ -5,7 +5,6 @@ ASR Transcription Routes for Whisper Pro ASR
 import json
 import logging
 import os
-import re
 import time
 import urllib.parse
 from typing import Any, Optional, TypedDict
@@ -311,28 +310,6 @@ def _build_base_request_params(
     return params
 
 
-#: ISO 639-2 (three-letter) codes to the two-letter codes the engines accept. Both the
-#: bibliographic and terminological spellings appear in the wild -- Bazarr sends "fre" and
-#: "fra" for the same language -- so both map here.
-_ISO_639_2_TO_1 = {
-    "eng": "en",
-    "fra": "fr",
-    "fre": "fr",
-    "deu": "de",
-    "ger": "de",
-    "spa": "es",
-    "por": "pt",
-    "ita": "it",
-    "nld": "nl",
-    "dut": "nl",
-    "rus": "ru",
-    "zho": "zh",
-    "chi": "zh",
-    "jpn": "ja",
-    "kor": "ko",
-}
-
-
 def _normalize_language(language: Optional[str]) -> Optional[str]:
     """Drop an unsupported language code so the request auto-detects instead of failing.
 
@@ -348,19 +325,11 @@ def _normalize_language(language: Optional[str]) -> Optional[str]:
     """
     if not language:
         return language
-    code = language.strip().lower()
-    if code in languages.LANGUAGES:
-        return code
-    # Split on either separator. A POSIX-style "en_US" reached the ISO 639-2 lookup whole,
-    # matched nothing, and auto-detected -- while the identical "en-US" resolved to "en".
-    primary_code = re.split(r"[-_]", code, maxsplit=1)[0]
-    if primary_code in languages.LANGUAGES:
-        return primary_code
-    mapped_code = _ISO_639_2_TO_1.get(primary_code)
-    if mapped_code in languages.LANGUAGES:
-        return mapped_code
-    logger.warning("[ASR] Ignoring unsupported language code %r; falling back to auto-detection.", language)
-    return None
+    code = languages.supported_code(language)
+    if code is None:
+        # The rejected value is not logged: it is request text (log injection, S5145).
+        logger.warning("[ASR] Ignoring an unsupported language code; falling back to auto-detection.")
+    return code
 
 
 def _apply_batch_and_diarization_params(
@@ -546,15 +515,23 @@ def _resolve_task_type(params: RequestParams) -> str:
     return "Translation" if params.get("task") == "translate" else "Transcription"
 
 
+# Supported code -> the same code, as a constant. The log line looks the request's
+# language up here, so a request can only ever put one of these strings into the log.
+_LOGGABLE_LANGUAGES = {code: code for code in languages.LANGUAGES}
+
+
 def _log_task_start(task_type: str, params: RequestParams) -> None:
-    # Both values come from the request: the format is logged in its normalized (closed-set)
-    # form and the language with control characters stripped, so neither can forge log lines.
-    language = "".join(ch for ch in str(params.get("language") or "") if ch.isprintable())
+    # Both values come from the request and are logged only as members of a closed set
+    # (log injection, pythonsecurity:S5145): the normalized format, and the language's
+    # canonical code as dispatch resolves it -- anything unsupported logs "unrecognized".
+    requested = params.get("language")
+    code = languages.supported_code(str(requested)) if requested else None
+    language = _LOGGABLE_LANGUAGES.get(code or "", "unrecognized") if requested else "auto-detect"
     logger.info(
         "    Task: %s | Format: %s | Lang: %s",
         task_type.upper(),
         _normalize_output_format(params.get("output_format", "srt")).upper(),
-        language or "auto-detect",
+        language,
     )
 
 

@@ -505,6 +505,13 @@ jobs:
           fi
 
       - name: SonarQube Scan
+        # Not on a tag. The scanner analyses a tag push as a branch named "refs/tags/vX",
+        # and non-main branch analysis is not available on this plan: the upload succeeds,
+        # then the gate's status poll gets HTTP 403 ("Organization is not allowed to access
+        # data from non main branches"), and both publish jobs are skipped. That is why the
+        # v1.4.1 and v1.4.2 tags produced no images and no GitHub Release. A tag is cut from
+        # a commit main has already analysed, so the tag step below gates on that analysis.
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         uses: SonarSource/sonarqube-scan-action@ba9859eae8dd6bd29e412f25ddbbef3d032000f4  # v8.2.2
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
@@ -518,7 +525,9 @@ jobs:
         # was a lint error upstream, which is noise standing exactly where the signal
         # should be. Skipping the gate here does not let anything through: every publish
         # job already depends on python-tests in its own right.
-        if: needs.python-tests.result == 'success' && needs.js-unit-tests.result == 'success'
+        if: >-
+          needs.python-tests.result == 'success' && needs.js-unit-tests.result == 'success' &&
+          !startsWith(github.ref, 'refs/tags/v')
         # Its own repository, not a sub-action of sonarqube-scan-action: that path does
         # not exist and the step failed to load in 4s, taking the job -- and with it both
         # publish jobs -- down with it.
@@ -526,6 +535,71 @@ jobs:
         timeout-minutes: 10
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      - name: SonarQube Quality Gate (main analysis of the tagged commit)
+        # The release gate for a tag: main must have an analysis OF this exact commit, and
+        # that analysis's quality gate must be OK. A tag on a commit main never analysed --
+        # or analysed and failed -- therefore still blocks publishing. The analysis is looked
+        # up by revision in main's history rather than read off main's latest analysis, so a
+        # tag cut after main has moved on still finds its own commit's result. The main push
+        # run for the same commit usually starts alongside this one, so poll while it lands.
+        # The token goes in a header built inside Python, never on a curl command line.
+        if: startsWith(github.ref, 'refs/tags/v')
+        timeout-minutes: 45
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          PROJECT_KEY: ventura8_Whisper-Pro-ASR
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, sys, time, urllib.parse, urllib.request
+
+          API = "https://sonarcloud.io/api"
+          project, sha = os.environ["PROJECT_KEY"], os.environ["GITHUB_SHA"]
+          headers = {"Authorization": "Bearer " + os.environ["SONAR_TOKEN"]} if os.environ.get("SONAR_TOKEN") else {}
+
+          def get(path, **params):
+              url = f"{API}/{path}?{urllib.parse.urlencode(params)}"
+              with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as resp:
+                  return json.load(resp)
+
+          def analysis_of_sha():
+              # Every page of main's history, not just the first: the tagged commit may be
+              # older than the most recent analyses. Capped so a runaway paging answer ends.
+              for page in range(1, 21):
+                  body = get("project_analyses/search", project=project, branch="main", ps=500, p=page)
+                  if not isinstance(body, dict) or not isinstance(body.get("analyses"), list):
+                      raise ValueError("malformed project_analyses/search response")
+                  for analysis in body["analyses"]:
+                      if isinstance(analysis, dict) and analysis.get("revision") == sha:
+                          return analysis.get("key")
+                  paging = body.get("paging") if isinstance(body.get("paging"), dict) else {}
+                  if page * int(paging.get("pageSize", 500)) >= int(paging.get("total", 0)):
+                      return None
+              return None
+
+          def gate_of(key):
+              body = get("qualitygates/project_status", analysisId=key)
+              status = body.get("projectStatus") if isinstance(body, dict) else None
+              if not isinstance(status, dict) or not status.get("status"):
+                  raise ValueError("malformed qualitygates/project_status response")
+              return status["status"]
+
+          for attempt in range(1, 81):
+              # A proxy or error page can answer 200 with a body that is not the JSON asked
+              # for; that is retried like a network error rather than crashing the step.
+              try:
+                  key = analysis_of_sha()
+                  gate = gate_of(key) if key else None
+              except (OSError, ValueError, KeyError, TypeError) as exc:
+                  key = gate = None
+                  print(f"attempt {attempt}: SonarCloud lookup failed: {exc}")
+              if gate:
+                  print(f"main analysis {key} of {sha}: quality gate {gate}")
+                  sys.exit(0 if gate == "OK" else f"Error: quality gate for the tagged commit is {gate}, not OK.")
+              print(f"attempt {attempt}: no main analysis of {sha} yet")
+              time.sleep(30)
+          sys.exit(f"Error: main never reported an analysis of {sha}; tag a commit main has analysed.")
+          PYEOF
 
   release-description-validation:
     name: Validate Release Metadata
